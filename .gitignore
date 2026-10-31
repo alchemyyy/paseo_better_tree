@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Logs and caches
+*.log
+npm-debug.log*
+*.tsbuildinfo
+.cache/
+
+# Packaged output
+*.zip
+*.tgz
+
+# Environment
+.env
+.env.*
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

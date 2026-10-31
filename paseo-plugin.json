@@ -1,0 +1,6 @@
+{
+  "id": "better-tree",
+  "name": "Better tree",
+  "description": "File tree pinned in Explorer with Markdown-link attachments, new/rename/cut/copy/paste/delete with VS Code shortcuts, Open in Default Text Editor, Open in file browser, Open terminal, Open with default app, Ctrl+scroll row spacing, and the working diff beside it",
+  "requirements": { "paseo": ">=0.13.0" }
+}
