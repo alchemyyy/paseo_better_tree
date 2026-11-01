@@ -1,6 +1,5 @@
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { open, readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type {
@@ -24,7 +23,7 @@ import type {
 } from "../shared/git-contracts";
 import {
   COMMIT_HEADER_FORMAT,
-  countTextLines,
+  countBufferLines,
   LOG_FORMAT,
   parseCommitHeader,
   parseLog,
@@ -35,17 +34,17 @@ import {
   parseWorktreeList,
 } from "./git-parse";
 import { appendGitignoreLine, gitignorePattern } from "../shared/gitignore";
+import { createCoalescer } from "./coalesce";
 import { isText, MAX_TEXT_BYTES, normalizeLineEndings } from "./diff-sources";
 import { mapLimited } from "./file-work";
 import { fileIconId } from "./file-icons";
+import { runGitProcess } from "./git-process";
 import { type GitObject, prepareGitObjects, readGitObjects } from "./object-reader";
 import { isInsideRepository } from "./repositories";
 import { createSerialQueue } from "./serial-queue";
 import { moveToTrash } from "./trash";
 import { resolveInsideRoot } from "./workspace-path";
 
-// Running git.exe directly on Windows avoids cmd.exe argument expansion
-const GIT_COMMAND = process.platform === "win32" ? "git.exe" : "git";
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 // Status polling must not take index.lock away from the user's own git commands
 const GIT_ENVIRONMENT = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
@@ -53,6 +52,8 @@ const DIFF_DIFFERENCES_EXIT_CODE = 1;
 const UNTRACKED_LINE_COUNT_LIMIT_BYTES = 2 * 1024 * 1024;
 // shortcut: caps per-refresh untracked file reads, raise if large untracked trees undercount
 const UNTRACKED_FILE_LIMIT = 2000;
+// shortcut: forgets every cached count past this many files, raise if huge untracked trees reread
+const UNTRACKED_LINE_CACHE_LIMIT = 20_000;
 const DEFAULT_LOG_LIMIT = 200;
 const NULL_DEVICE = "/dev/null";
 const STAGE_BATCH_SIZE = 100;
@@ -64,6 +65,16 @@ const REMOTE_TIMEOUT_MS = 120_000;
 // Index writes in one worktree run one at a time, in arrival order: git refuses a second writer
 // while index.lock exists, and a commit queued behind a stage must include what was staged
 const indexWrites = createSerialQueue();
+// Status, summary, worktree, and log reads asked for while the same read runs share the one after it
+const sharedReads = createCoalescer();
+
+/** Which of git-process's lanes a read waits in: polling reads of a shown panel, or a row's totals */
+interface ReadLane {
+  background?: boolean;
+  low?: boolean;
+}
+const POLLING_READ: ReadLane = { background: true };
+const SECONDARY_READ: ReadLane = { background: true, low: true };
 
 function queuedIndexWrite<Input extends { worktree: string }, Output>(
   write: (input: Input) => Promise<Output>,
@@ -71,86 +82,82 @@ function queuedIndexWrite<Input extends { worktree: string }, Output>(
   return (input) => indexWrites(pathKey(input.worktree), () => write(input));
 }
 
-function runGit(
+async function runGit(
   cwd: string,
   args: string[],
   allowedExitCodes: number[] = [],
-  options: { env?: NodeJS.ProcessEnv; timeout?: number } = {},
+  options: { env?: NodeJS.ProcessEnv; timeout?: number } & ReadLane = {},
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      GIT_COMMAND,
-      args,
-      {
-        cwd,
-        env: options.env ?? GIT_ENVIRONMENT,
-        timeout: options.timeout,
-        maxBuffer: GIT_MAX_BUFFER,
-        windowsHide: true,
-        encoding: "utf8",
-      },
-      (error, stdout, stderr) => {
-        if (!error) {
-          resolve(stdout);
-          return;
-        }
-        const exitCode = typeof error.code === "number" ? error.code : null;
-        if (exitCode !== null && allowedExitCodes.includes(exitCode)) {
-          resolve(stdout);
-          return;
-        }
-        // Some refusals ("nothing to commit") are printed to stdout, not stderr
-        reject(new Error(stderr.trim() || stdout.trim() || error.message));
-      },
-    );
+  const result = await runGitProcess(cwd, args, {
+    env: options.env ?? GIT_ENVIRONMENT,
+    timeout: options.timeout,
+    maxBuffer: GIT_MAX_BUFFER,
+    background: options.background,
+    low: options.low,
   });
+  if (result.error === null) return result.stdout;
+  if (result.exitCode !== null && allowedExitCodes.includes(result.exitCode)) return result.stdout;
+  // Some refusals ("nothing to commit") are printed to stdout, not stderr
+  throw new Error(result.stderr.trim() || result.stdout.trim() || result.error);
 }
 
-async function hasHead(worktree: string): Promise<boolean> {
+async function hasHead(worktree: string, background = false): Promise<boolean> {
   try {
-    await runGit(worktree, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+    await runGit(worktree, ["rev-parse", "--verify", "--quiet", "HEAD"], [], { background });
     return true;
   } catch {
     return false;
   }
 }
 
-function assertDirectory(directory: string): string {
+async function assertDirectory(directory: string): Promise<string> {
   const resolved = path.resolve(directory);
-  if (!existsSync(resolved)) throw new Error(`Worktree does not exist: ${directory}`);
+  if (!(await stat(resolved).catch(() => null))) throw new Error(`Worktree does not exist: ${directory}`);
   return resolved;
 }
 
-async function countUntrackedLines(worktree: string, relativePath: string): Promise<number> {
-  const handle = await open(path.join(worktree, relativePath), "r").catch(() => null);
-  if (!handle) return 0;
-  try {
-    const { size, isFile } = await handle.stat().then((stats) => ({
-      size: stats.size,
-      isFile: stats.isFile(),
-    }));
-    if (!isFile || size > UNTRACKED_LINE_COUNT_LIMIT_BYTES) return 0;
-    const content = await handle.readFile({ encoding: "utf8" });
-    return countTextLines(content);
-  } finally {
-    await handle.close();
-  }
+/** Line counts of untracked files by absolute path, reused while a file's size and mtime hold */
+const untrackedLineCounts = new Map<string, { size: number; mtimeMs: number; lines: number }>();
+
+async function countUntrackedLines(file: string): Promise<number> {
+  const stats = await stat(file).catch(() => null);
+  if (!stats || !stats.isFile() || stats.size > UNTRACKED_LINE_COUNT_LIMIT_BYTES) return 0;
+  const cached = untrackedLineCounts.get(file);
+  if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) return cached.lines;
+  const content = await readFile(file).catch(() => null);
+  if (!content) return 0;
+  const lines = countBufferLines(content);
+  if (untrackedLineCounts.size >= UNTRACKED_LINE_CACHE_LIMIT) untrackedLineCounts.clear();
+  untrackedLineCounts.set(file, { size: stats.size, mtimeMs: stats.mtimeMs, lines });
+  return lines;
 }
 
-async function readNumstat(worktree: string, args: string[]): Promise<Map<string, { additions: number; deletions: number }>> {
+async function readNumstat(
+  worktree: string,
+  args: string[],
+  lane: ReadLane,
+): Promise<Map<string, { additions: number; deletions: number }>> {
   const totals = new Map<string, { additions: number; deletions: number }>();
-  for (const record of parseNumstatZ(await runGit(worktree, ["diff", "--numstat", "-z", ...args]))) {
+  const output = await runGit(worktree, ["diff", "--numstat", "-z", ...args], [], lane);
+  for (const record of parseNumstatZ(output)) {
     totals.set(record.path, { additions: record.additions, deletions: record.deletions });
   }
   return totals;
 }
 
-/** Changed and untracked files of one worktree with per-file line totals */
-async function collectFiles(worktree: string): Promise<GitFile[]> {
+/**
+ * Changed and untracked files of one worktree with per-file line totals, for the changes list. A
+ * call made while a read of the worktree runs gets the next read, which starts after it
+ */
+function collectFiles(worktree: string): Promise<GitFile[]> {
+  return sharedReads(`status:${pathKey(worktree)}`, () => readFiles(worktree, POLLING_READ));
+}
+
+async function readFiles(worktree: string, lane: ReadLane): Promise<GitFile[]> {
   const [statusOutput, stagedTotals, unstagedTotals] = await Promise.all([
-    runGit(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    readNumstat(worktree, ["--cached"]),
-    readNumstat(worktree, []),
+    runGit(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], [], lane),
+    readNumstat(worktree, ["--cached"], lane),
+    readNumstat(worktree, [], lane),
   ]);
   const records = parseStatusZ(statusOutput).filter((record) => record.index !== "!");
   // The first untracked files are read for their line counts
@@ -158,7 +165,7 @@ async function collectFiles(worktree: string): Promise<GitFile[]> {
     .filter((record) => record.index === "?")
     .slice(0, UNTRACKED_FILE_LIMIT)
     .map((record) => record.path);
-  const lineCounts = await mapLimited(counted, (relativePath) => countUntrackedLines(worktree, relativePath));
+  const lineCounts = await mapLimited(counted, (relativePath) => countUntrackedLines(path.join(worktree, relativePath)));
   const untrackedLines = new Map(counted.map((relativePath, index): [string, number] => [relativePath, lineCounts[index]]));
   const files: GitFile[] = [];
   for (const record of records) {
@@ -191,7 +198,7 @@ async function latestModification(worktree: string, files: readonly GitFile[]): 
   let latest = 0;
   try {
     const commitSeconds = Number.parseInt(
-      (await runGit(worktree, ["log", "-1", "--format=%ct"])).trim(),
+      (await runGit(worktree, ["log", "-1", "--format=%ct"], [], SECONDARY_READ)).trim(),
       10,
     );
     if (Number.isFinite(commitSeconds)) latest = commitSeconds * 1000;
@@ -225,17 +232,20 @@ export async function listWorktrees({
   root,
 }: RpcInput<typeof gitWorktreesRpc>): Promise<RpcOutput<typeof gitWorktreesRpc>> {
   const directory = path.resolve(root);
-  // A folder that is gone or in no repository answers without running git; the Git panel then
-  // lists the repositories inside it
-  if (!existsSync(directory) || !(await isInsideRepository(directory))) return { worktrees: [] };
-  const [topLevel, list] = await Promise.all([
-    runGit(directory, ["rev-parse", "--show-toplevel"]),
-    runGit(directory, ["worktree", "list", "--porcelain"]),
-  ]);
-  const worktrees = parseWorktreeList(list)
-    .filter((record) => !record.bare)
-    .map((record): Worktree => {
-      const missing = record.prunable || !existsSync(record.path);
+  return sharedReads(`worktrees:${pathKey(directory)}`, async () => {
+    // A folder that is gone or in no repository answers without running git; the Git panel then
+    // lists the repositories inside it
+    if (!(await stat(directory).catch(() => null)) || !(await isInsideRepository(directory))) return { worktrees: [] };
+    const [topLevel, list] = await Promise.all([
+      runGit(directory, ["rev-parse", "--show-toplevel"], [], { background: true }),
+      runGit(directory, ["worktree", "list", "--porcelain"], [], { background: true }),
+    ]);
+    const records = parseWorktreeList(list).filter((record) => !record.bare);
+    const present = await Promise.all(
+      records.map((record) => !record.prunable && stat(record.path).then(() => true, () => false)),
+    );
+    const worktrees = records.map((record, index): Worktree => {
+      const missing = !present[index];
       return {
         path: path.resolve(record.path),
         branch: record.branch,
@@ -244,31 +254,34 @@ export async function listWorktrees({
         missing,
       };
     });
-  // Active first, missing last, git's order otherwise
-  const rank = (worktree: Worktree) => (worktree.current ? 0 : worktree.missing ? 2 : 1);
-  worktrees.sort((left, right) => rank(left) - rank(right));
-  return { worktrees };
+    // Active first, missing last, git's order otherwise
+    const rank = (worktree: Worktree) => (worktree.current ? 0 : worktree.missing ? 2 : 1);
+    worktrees.sort((left, right) => rank(left) - rank(right));
+    return { worktrees };
+  });
 }
 
-/** A worktree's line totals and when it last changed, for its row in the Git panel */
+/** A worktree's line totals and when it last changed, for its row in the Git panel; it waits behind the shown panel's reads */
 export async function worktreeSummary({
   worktree,
 }: RpcInput<typeof gitWorktreeSummaryRpc>): Promise<RpcOutput<typeof gitWorktreeSummaryRpc>> {
-  const directory = assertDirectory(worktree);
-  const files = await collectFiles(directory);
-  let additions = 0;
-  let deletions = 0;
-  for (const file of files) {
-    additions += file.additions;
-    deletions += file.deletions;
-  }
-  return { additions, deletions, modifiedAt: await latestModification(directory, files) };
+  const directory = await assertDirectory(worktree);
+  return sharedReads(`summary:${pathKey(directory)}`, async () => {
+    const files = await readFiles(directory, SECONDARY_READ);
+    let additions = 0;
+    let deletions = 0;
+    for (const file of files) {
+      additions += file.additions;
+      deletions += file.deletions;
+    }
+    return { additions, deletions, modifiedAt: await latestModification(directory, files) };
+  });
 }
 
 export async function listStatus({
   worktree,
 }: RpcInput<typeof gitStatusRpc>): Promise<RpcOutput<typeof gitStatusRpc>> {
-  return { files: await collectFiles(assertDirectory(worktree)) };
+  return { files: await collectFiles(await assertDirectory(worktree)) };
 }
 
 /**
@@ -280,7 +293,7 @@ export const setStaged = queuedIndexWrite(async ({
   paths,
   staged,
 }: RpcInput<typeof gitStageRpc>): Promise<RpcOutput<typeof gitStageRpc>> => {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   for (const relativePath of paths) resolveInsideRoot(directory, relativePath);
   // Before the first commit there is nothing to restore from; rm --cached keeps the files on disk
   let command = ["add"];
@@ -289,7 +302,8 @@ export const setStaged = queuedIndexWrite(async ({
     // Literal pathspecs: a file named "*.txt" must not match every text file
     await runGit(directory, ["--literal-pathspecs", ...command, "--", ...paths.slice(start, start + STAGE_BATCH_SIZE)]);
   }
-  return { files: await collectFiles(directory) };
+  // Read now rather than behind polling reads: the panel waits on it to settle the checkbox
+  return { files: await readFiles(directory, {}) };
 });
 
 /** Appends a line ignoring exactly one path to the worktree's top-level .gitignore */
@@ -298,7 +312,7 @@ export async function ignorePath({
   path: relativePath,
   kind,
 }: RpcInput<typeof gitIgnoreRpc>): Promise<RpcOutput<typeof gitIgnoreRpc>> {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   if (resolveInsideRoot(directory, relativePath) === directory) throw new Error("The worktree itself cannot be ignored");
   const pattern = gitignorePattern(relativePath, kind === "directory");
   const gitignore = path.join(directory, ".gitignore");
@@ -319,7 +333,7 @@ export const revertChanges = queuedIndexWrite(async ({
   worktree,
   paths,
 }: RpcInput<typeof gitRevertRpc>): Promise<RpcOutput<typeof gitRevertRpc>> => {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   for (const relativePath of paths) resolveInsideRoot(directory, relativePath);
   const head = await hasHead(directory);
   const inHead = new Set<string>();
@@ -376,7 +390,7 @@ export async function fileDiff({
   worktree,
   path: relativePath,
 }: RpcInput<typeof gitDiffRpc>): Promise<RpcOutput<typeof gitDiffRpc>> {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   resolveInsideRoot(directory, relativePath);
   const tracked = (await runGit(directory, ["ls-files", "--", relativePath])).trim() !== "";
   if (!tracked) {
@@ -399,21 +413,24 @@ export async function commitLog({
   worktree,
   limit,
 }: RpcInput<typeof gitLogRpc>): Promise<RpcOutput<typeof gitLogRpc>> {
-  const directory = assertDirectory(worktree);
-  try {
-    const output = await runGit(directory, [
-      "log",
-      `-n${limit ?? DEFAULT_LOG_LIMIT}`,
-      "--decorate=full",
-      `--format=${LOG_FORMAT}`,
-    ]);
-    return { commits: parseLog(output) };
-  } catch (error) {
-    // A repository without commits has no history. Asked only after a failed log, so the usual
-    // case costs one git call
-    if (!(await hasHead(directory))) return { commits: [] };
-    throw error;
-  }
+  const directory = await assertDirectory(worktree);
+  const count = limit ?? DEFAULT_LOG_LIMIT;
+  return sharedReads(`log:${pathKey(directory)}:${count}`, async () => {
+    try {
+      const output = await runGit(
+        directory,
+        ["log", `-n${count}`, "--decorate=full", `--format=${LOG_FORMAT}`],
+        [],
+        { background: true },
+      );
+      return { commits: parseLog(output) };
+    } catch (error) {
+      // A repository without commits has no history. Asked only after a failed log, so the usual
+      // case costs one git call
+      if (!(await hasHead(directory, true))) return { commits: [] };
+      throw error;
+    }
+  });
 }
 
 // diff-tree is plumbing: user diff settings do not apply, so renames are asked for
@@ -424,7 +441,7 @@ export async function commitDetails({
   worktree,
   sha,
 }: RpcInput<typeof gitCommitDetailsRpc>): Promise<RpcOutput<typeof gitCommitDetailsRpc>> {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   // The files' texts are read next; the reader starts while git lists them
   prepareGitObjects(directory);
   // Most commits have a parent, so the files are listed beside the commit's description rather
@@ -460,8 +477,12 @@ export async function commitDetails({
 }
 
 /** The worktree directory, after checking that the file's paths stay inside it */
-function commitFileDirectory({ worktree, path: relativePath, previousPath }: RpcInput<typeof gitCommitFileRpc>): string {
-  const directory = assertDirectory(worktree);
+async function commitFileDirectory({
+  worktree,
+  path: relativePath,
+  previousPath,
+}: RpcInput<typeof gitCommitFileRpc>): Promise<string> {
+  const directory = await assertDirectory(worktree);
   resolveInsideRoot(directory, relativePath);
   if (previousPath) resolveInsideRoot(directory, previousPath);
   return directory;
@@ -479,7 +500,7 @@ function blobText(object: GitObject): string | null {
 export async function commitFileSources(
   input: RpcInput<typeof gitCommitFileRpc>,
 ): Promise<RpcOutput<typeof gitCommitFileRpc>> {
-  const directory = commitFileDirectory(input);
+  const directory = await commitFileDirectory(input);
   const { sha, path: filePath, previousPath } = input;
   // A first commit has no parent, so its files read as new
   const [commit, original, current] = await readGitObjects(
@@ -495,7 +516,7 @@ export async function commitFileSources(
 export async function commitFileDiff(
   input: RpcInput<typeof gitCommitFileDiffRpc>,
 ): Promise<RpcOutput<typeof gitCommitFileDiffRpc>> {
-  const directory = commitFileDirectory(input);
+  const directory = await commitFileDirectory(input);
   const patch = ["diff-tree", "-p", "-M", "--no-color", "--no-commit-id"];
   const paths = ["--", ...(input.previousPath ? [input.previousPath, input.path] : [input.path])];
   try {
@@ -514,7 +535,7 @@ export const commit = queuedIndexWrite(async ({
   message,
   mode,
 }: RpcInput<typeof gitCommitRpc>): Promise<RpcOutput<typeof gitCommitRpc>> => {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   const trimmed = message.trim();
   if (!trimmed && mode !== "amend") throw new Error("Enter a commit message");
   const args = ["commit"];
@@ -528,7 +549,7 @@ export const commit = queuedIndexWrite(async ({
       args.push("--amend");
       break;
   }
-  // execFile passes the message as one argument, so newlines and quotes need no escaping
+  // git starts without a shell, so the message is one argument: newlines and quotes need no escaping
   args.push(...(trimmed ? ["-m", trimmed] : ["--no-edit"]));
   await runGit(directory, args);
   const [sha, subject] = (await runGit(directory, ["log", "-1", "--format=%H%x1f%s"])).trim().split("\x1f");
@@ -539,7 +560,7 @@ export const commit = queuedIndexWrite(async ({
 export const uncommit = queuedIndexWrite(async ({
   worktree,
 }: RpcInput<typeof gitUncommitRpc>): Promise<RpcOutput<typeof gitUncommitRpc>> => {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   try {
     await runGit(directory, ["rev-parse", "--verify", "--quiet", "HEAD~1"]);
   } catch {
@@ -557,7 +578,7 @@ export async function remote({
   worktree,
   action,
 }: RpcInput<typeof gitRemoteRpc>): Promise<RpcOutput<typeof gitRemoteRpc>> {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   const options = { env: REMOTE_ENVIRONMENT, timeout: REMOTE_TIMEOUT_MS };
   switch (action) {
     case "fetch":
@@ -590,7 +611,7 @@ export const checkoutCommit = queuedIndexWrite(async ({
   action,
   branch,
 }: RpcInput<typeof gitCheckoutRpc>): Promise<RpcOutput<typeof gitCheckoutRpc>> => {
-  const directory = assertDirectory(worktree);
+  const directory = await assertDirectory(worktree);
   const fullSha = (await runGit(directory, ["rev-parse", "--verify", `${sha}^{commit}`])).trim();
   const shortSha = fullSha.slice(0, 8);
   switch (action) {

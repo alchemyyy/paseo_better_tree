@@ -244,3 +244,13 @@ export function countTextLines(content: string): number {
   }
   return content.endsWith("\n") ? lines : lines + 1;
 }
+
+/** countTextLines of a file's bytes, without decoding them: UTF-8 has a NUL or newline byte only for those characters */
+export function countBufferLines(buffer: Uint8Array): number {
+  if (buffer.length === 0 || buffer.includes(0)) return 0;
+  let lines = 0;
+  for (let index = 0; index < buffer.length; index++) {
+    if (buffer[index] === 10) lines++;
+  }
+  return buffer[buffer.length - 1] === 10 ? lines : lines + 1;
+}

@@ -62,6 +62,7 @@ import { useGlobalLayout } from "./global-layout";
 import { savePreferences } from "./preference-saver";
 import { FileIcon } from "./file-icon";
 import { FilterBar } from "./filter-bar";
+import { useOnScreen } from "./on-screen";
 import {
   findLayoutStore,
   findPanelHost,
@@ -124,8 +125,10 @@ import {
   treeRowDataProps,
 } from "./web";
 
-// shortcut: polls expanded directories instead of watching, upgrade if large trees feel slow
+// shortcut: polls the shown folders instead of watching them, upgrade if large trees feel slow
 const REFRESH_INTERVAL_MS = 4000;
+/** A folder the pointer rests on this long loads its listing ahead of a click */
+const HOVER_PREFETCH_DELAY_MS = 120;
 const INDENT_WIDTH = 12;
 const ROW_ICON_SIZE = 14;
 const FILE_OPEN_SOURCE = "explorerFiles";
@@ -229,6 +232,8 @@ function TreePanel({
   /** Folder under an in-progress tree drag; ROOT_PATH highlights the whole list */
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const rootRef = useRef<View>(null);
+  // A hidden tree (another workspace, a background tab) lists, searches, and colors nothing
+  const onScreen = useOnScreen(rootRef);
   const rootOffsetRef = useRef({ x: 0, y: 0 });
   const [bounds, setBounds] = useState({ width: 0, height: 0 });
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -252,7 +257,7 @@ function TreePanel({
       displayOverrides.treeGitChanges ?? (settings.status === "ready" ? settings.values.treeGitChanges : false),
   };
   const { rowPadding, fontWeight, fontSize, treeGitChanges } = display;
-  const gitColors = useGitChangeColors(workspaceDirectory, treeGitChanges);
+  const gitColors = useGitChangeColors(workspaceDirectory, treeGitChanges && onScreen);
   const displayRef = useRef(display);
   displayRef.current = display;
   useGlobalLayout(rootRef, settings);
@@ -290,8 +295,19 @@ function TreePanel({
     [updateDisplay],
   );
 
-  // Directory listings for the root and every expanded folder
-  const directoryPaths = useMemo(() => [ROOT_PATH, ...tabState.expanded], [tabState.expanded]);
+  // Directory listings for the root and every shown folder; folders inside a closed one wait until it opens
+  const directoryPaths = useMemo(
+    () => [
+      ROOT_PATH,
+      ...tabState.expanded.filter((path) => {
+        for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) {
+          if (!expanded.has(path.slice(0, slash))) return false;
+        }
+        return true;
+      }),
+    ],
+    [tabState.expanded, expanded],
+  );
   const combineListings = useCallback(
     (
       results: {
@@ -320,8 +336,11 @@ function TreePanel({
     queries: directoryPaths.map((path) => ({
       queryKey: ["better-tree", "directory", root, path],
       queryFn: () => listDirectory({ root: root ?? "", path }),
-      enabled: root !== null,
+      enabled: root !== null && onScreen,
+      // A tree shown again refetches listings older than one poll at once
+      staleTime: REFRESH_INTERVAL_MS,
       refetchInterval: REFRESH_INTERVAL_MS,
+      retry: 1,
     })),
     combine: combineListings,
   });
@@ -359,10 +378,12 @@ function TreePanel({
     // Under the listings' key, so whatever refreshes the listings refreshes the filter too
     queryKey: ["better-tree", "directory", root, { filter: filterQuery }],
     queryFn: () => searchTree({ root: root ?? "", query: filterQuery }),
-    enabled: root !== null && filtering,
+    enabled: root !== null && filtering && onScreen,
     // The previous filter's results stay up while the next one searches
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[2] === root ? previous : undefined),
+    staleTime: FILTER_REFRESH_INTERVAL_MS,
     refetchInterval: FILTER_REFRESH_INTERVAL_MS,
+    retry: 1,
   });
   const filterView = useMemo(() => (search.data ? buildFilterView(search.data.entries) : null), [search.data]);
   // Another filter shows every match again
@@ -595,6 +616,19 @@ function TreePanel({
 
   // Row actions show on hover, or while active: pinned, or already referenced in the message box
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
+  // A closed folder the pointer rests on loads its listing, so opening it shows children at once
+  useEffect(() => {
+    if (!onScreen || !root || filtering || hoveredPath === null || expanded.has(hoveredPath)) return;
+    if (rowsRef.current.find((row) => row.entry.path === hoveredPath)?.entry.kind !== "directory") return;
+    const timer = setTimeout(() => {
+      void queryClient.prefetchQuery({
+        queryKey: ["better-tree", "directory", root, hoveredPath],
+        queryFn: () => listDirectory({ root, path: hoveredPath }),
+        staleTime: REFRESH_INTERVAL_MS,
+      });
+    }, HOVER_PREFETCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [onScreen, root, filtering, hoveredPath, expanded, queryClient, listDirectory]);
   const alwaysShowActions = layout.compact || layout.platform !== "web";
   const [composer, setComposer] = useState<ComposerSnapshot | null>(null);
   const [cwdRevision, setCwdRevision] = useState(0);

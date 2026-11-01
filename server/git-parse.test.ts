@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  countBufferLines,
   countTextLines,
   parseCommitHeader,
   parseLog,
@@ -118,4 +119,19 @@ test("countTextLines counts a trailing partial line and ignores binary", () => {
   assert.equal(countTextLines("a\nb\n"), 2);
   assert.equal(countTextLines("a\nb"), 2);
   assert.equal(countTextLines("a\0b"), 0);
+});
+
+test("countBufferLines agrees with countTextLines on the file's text", () => {
+  const cases: [string, number][] = [
+    ["", 0],
+    ["one line", 1],
+    ["a\nb\n", 2],
+    ["a\r\nb\r\nc", 3],
+    ["a\0b\n", 0],
+    ["héllo wörld\n日本語 🙂\n", 2],
+  ];
+  for (const [text, lines] of cases) {
+    assert.equal(countBufferLines(Buffer.from(text, "utf8")), lines, JSON.stringify(text));
+    assert.equal(countTextLines(text), lines, JSON.stringify(text));
+  }
 });

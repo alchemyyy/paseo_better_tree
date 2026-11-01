@@ -1,18 +1,14 @@
-import { execFile } from "node:child_process";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { SearchEntry, searchTreeRpc } from "../shared/contracts";
 // NOTE: Explicit extensions so `node --test` can load this module directly
 import { matchesTreeFilter, parseTreeFilter } from "../shared/tree-filter.ts";
 import { mapLimited } from "./file-work.ts";
 import { fileIconId } from "./file-icons.ts";
+import { runGitProcess } from "./git-process.ts";
 import { compareTreeEntries, HIDDEN_NAMES, isRepositoryFolder, UNSEARCHED_FOLDERS } from "./tree.ts";
 
-const runFile = promisify(execFile);
-// Running git.exe directly on Windows avoids cmd.exe argument expansion
-const GIT_COMMAND = process.platform === "win32" ? "git.exe" : "git";
 // Listing must not take index.lock away from the user's own git commands
 const GIT_ENVIRONMENT = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
 const GIT_MAX_BUFFER = 256 * 1024 * 1024;
@@ -95,15 +91,13 @@ async function git(cwd: string, args: string[]): Promise<string> {
   // NOTE: executor form, since tsconfig's ES2023 lib has no Promise.withResolvers
   else await new Promise<void>((resolve) => gitWaiting.push(resolve));
   try {
-    const { stdout } = await runFile(GIT_COMMAND, args, {
-      cwd,
+    const result = await runGitProcess(cwd, args, {
       env: GIT_ENVIRONMENT,
-      encoding: "utf8",
       maxBuffer: GIT_MAX_BUFFER,
       timeout: GIT_TIMEOUT_MS,
-      windowsHide: true,
     });
-    return stdout;
+    if (result.error !== null) throw new Error(result.error);
+    return result.stdout;
   } finally {
     // A waiting call takes over the slot
     const next = gitWaiting.shift();

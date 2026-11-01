@@ -11,11 +11,12 @@ import { codemirror } from "./codemirror";
 import { DIFF_CONFIG } from "./diff-editor";
 import { DiffTabStateSchema } from "./diff-tabs";
 import { DiffLineView, lookFromTheme, ModeSelector, useMountedDiff } from "./diff-views";
+import { DIFF_REFRESH_MS } from "./git-live";
+import { useOnScreen } from "./on-screen";
 import { closeOriginalSide, openOriginalSide } from "./split-panes";
 import { joinPath } from "./tree-model";
 import { type DiffLine, parseUnifiedDiff } from "./git-model";
 
-const REFRESH_INTERVAL_MS = 4000;
 const NullableDiffStateSchema = DiffTabStateSchema.nullable();
 
 function basename(path: string): string {
@@ -47,13 +48,16 @@ export function DiffPanel(props: PluginWorkspacePanelProps) {
   return <RichDiffPanel {...props} />;
 }
 
-function useDiffSources(absolutePath: string | null) {
+/** Polls the file and HEAD's copy while the tab is on screen; showing it again refetches stale sources */
+function useDiffSources(absolutePath: string | null, onScreen: boolean) {
   const loadSources = useRpc(diffSourcesRpc);
   return useQuery({
     queryKey: ["better-tree", "diff-sources", absolutePath],
     queryFn: () => loadSources({ path: absolutePath! }),
-    enabled: absolutePath !== null,
-    refetchInterval: REFRESH_INTERVAL_MS,
+    enabled: absolutePath !== null && onScreen,
+    refetchInterval: DIFF_REFRESH_MS,
+    staleTime: DIFF_REFRESH_MS,
+    retry: 1,
   });
 }
 
@@ -71,7 +75,9 @@ function RichDiffPanel({ theme, tab }: PluginWorkspacePanelProps) {
   const [spec, setSpec] = useTabState(tab, NullableDiffStateSchema, null);
   const absolutePath = spec ? (spec.worktree ? joinPath(spec.worktree, spec.path) : spec.path) : null;
   const mode: RichMode = spec?.mode ?? "unified";
-  const query = useDiffSources(absolutePath);
+  // On the outer view: the host is hidden while the sources load
+  const rootRef = useRef<View>(null);
+  const query = useDiffSources(absolutePath, useOnScreen(rootRef));
   const look = useMemo(() => lookFromTheme(theme), [theme]);
   const hostRef = useRef<View>(null);
   const pairKey = absolutePath ? `diff|${absolutePath}` : null;
@@ -101,7 +107,7 @@ function RichDiffPanel({ theme, tab }: PluginWorkspacePanelProps) {
   const muted = theme.colors.foregroundMuted;
   const message = !spec ? "Pick a file in the Git panel." : sourcesMessage(query);
   return (
-    <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
+    <View ref={rootRef} style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       {spec ? (
         <View style={[headerStyle(theme), { gap: 8 }]}>
           <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontWeight: "600" }}>
@@ -131,13 +137,14 @@ function RichDiffPanel({ theme, tab }: PluginWorkspacePanelProps) {
 }
 
 function OriginalSidePanel({ theme, path, pairKey }: PluginWorkspacePanelProps & { path: string; pairKey: string }) {
-  const query = useDiffSources(path);
+  const rootRef = useRef<View>(null);
+  const query = useDiffSources(path, useOnScreen(rootRef));
   const look = useMemo(() => lookFromTheme(theme), [theme]);
   const hostRef = useRef<View>(null);
   useMountedDiff(hostRef, query.data, basename(path), "original", look, pairKey);
   const message = sourcesMessage(query);
   return (
-    <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
+    <View ref={rootRef} style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <View style={[headerStyle(theme), { gap: 8 }]}>
         <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontWeight: "600" }}>
           {basename(path)}
@@ -187,7 +194,7 @@ function LegacyDiffPanel({ theme, tab }: PluginWorkspacePanelProps) {
     queryKey: ["better-tree", "git", "diff", spec?.worktree, spec?.path],
     queryFn: () => loadDiff({ worktree: spec!.worktree, path: spec!.path }),
     enabled: spec !== null,
-    refetchInterval: REFRESH_INTERVAL_MS,
+    refetchInterval: DIFF_REFRESH_MS,
   });
   const lines = useMemo(() => parseUnifiedDiff(diff.data?.diff ?? ""), [diff.data?.diff]);
   const totals = useMemo(() => {

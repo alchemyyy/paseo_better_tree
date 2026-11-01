@@ -8,6 +8,8 @@ const GIT_COMMAND = process.platform === "win32" ? "git.exe" : "git";
 const GIT_ENVIRONMENT = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
 // shortcut: a reader lives while a commit's files are browsed, raise if reopening shows between clicks
 const IDLE_CLOSE_MS = 60_000;
+// A read unanswered this long means git is wedged; failing the reader lets the next read start a new one
+const OBJECT_READ_TIMEOUT_MS = 20_000;
 const STDERR_LIMIT = 2000;
 const LINE_FEED = 0x0a;
 // "<object id> <type> <size>"; any other answer ("<name> missing", "<name> ambiguous") names nothing
@@ -108,6 +110,8 @@ class BatchReader {
   private stderr = "";
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
+  /** Settles once git has exited, so a shutdown can wait for its working directory to be released */
+  readonly closed: Promise<void>;
 
   constructor(directory: string, onStopped: () => void) {
     this.onStopped = onStopped;
@@ -124,8 +128,17 @@ class BatchReader {
     });
     // A write racing the process's exit fails here; "close" says why
     this.child.stdin.on("error", () => undefined);
-    this.child.on("error", (error) => this.fail(error));
-    this.child.on("close", () => this.fail(new Error(this.stderr.trim() || "git cat-file stopped")));
+    // NOTE: executor form, since tsconfig's ES2023 lib has no Promise.withResolvers
+    this.closed = new Promise((resolve) => {
+      this.child.on("error", (error) => {
+        this.fail(error);
+        resolve();
+      });
+      this.child.on("close", () => {
+        this.fail(new Error(this.stderr.trim() || "git cat-file stopped"));
+        resolve();
+      });
+    });
     this.scheduleIdleClose();
   }
 
@@ -135,7 +148,21 @@ class BatchReader {
     if (this.stopped) return Promise.reject(new Error("git cat-file stopped"));
     // NOTE: executor form, since tsconfig's ES2023 lib has no Promise.withResolvers
     return new Promise((resolve, reject) => {
-      this.queue.push({ maxBytes, resolve, reject });
+      const timer = setTimeout(
+        () => this.fail(new Error(`git cat-file did not answer within ${OBJECT_READ_TIMEOUT_MS} ms`)),
+        OBJECT_READ_TIMEOUT_MS,
+      );
+      this.queue.push({
+        maxBytes,
+        resolve: (object) => {
+          clearTimeout(timer);
+          resolve(object);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
       this.child.stdin.write(`${name}\n`);
       this.scheduleIdleClose();
     });
@@ -190,7 +217,9 @@ export function readGitObjects(directory: string, names: readonly string[], maxB
   return Promise.all(names.map((name) => reader.read(name, maxBytes)));
 }
 
-/** Stops every reader; the plugin's cleanup calls this */
-export function stopGitObjectReaders(): void {
-  for (const reader of [...readers.values()]) reader.stop();
+/** Stops every reader and settles once their git processes have exited; the plugin's cleanup calls this */
+export async function stopGitObjectReaders(): Promise<void> {
+  const stopping = [...readers.values()];
+  for (const reader of stopping) reader.stop();
+  await Promise.all(stopping.map((reader) => reader.closed));
 }

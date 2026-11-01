@@ -469,6 +469,27 @@ export function attachTreeDomEvents(node: unknown, handlers: TreeDomHandlers): (
   };
 }
 
+declare class ResizeObserver {
+  constructor(callback: (entries: readonly { contentRect: { width: number; height: number } }[]) => void);
+  observe(target: DomElement): void;
+  disconnect(): void;
+}
+
+/**
+ * Calls `onChange` with whether `node` takes up room on screen. Paseo keeps the panels of other
+ * workspaces and of background tabs mounted but hidden; a hidden node has no size. A node hidden
+ * from the start reports nothing until it shows. Returns null off web, where there is no DOM.
+ */
+export function observeOnScreen(node: unknown, onChange: (onScreen: boolean) => void): (() => void) | null {
+  if (Platform.OS !== "web" || !node) return null;
+  const observer = new ResizeObserver((entries) => {
+    const last = entries[entries.length - 1];
+    if (last) onChange(last.contentRect.width > 0 && last.contentRect.height > 0);
+  });
+  observer.observe(node as DomElement);
+  return () => observer.disconnect();
+}
+
 /**
  * Calls `onOutside` when a press starts outside `node`, anywhere in the window. Listens in the
  * capture phase without consuming the event, so the press still reaches its target. No-op off web.

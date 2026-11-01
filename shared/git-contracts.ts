@@ -183,7 +183,11 @@ export const gitChangesRpc = defineRpc({
     /** The version last seen; 0 to get the current one immediately */
     version: z.number(),
   }),
-  output: z.object({ version: z.number() }),
+  output: z.object({
+    version: z.number(),
+    /** The version at which HEAD, a branch, or another ref last changed; older than the version last seen means only files changed */
+    refsVersion: z.number(),
+  }),
 });
 
 export const gitCheckoutRpc = defineRpc({

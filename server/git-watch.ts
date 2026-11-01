@@ -1,10 +1,10 @@
-import { execFile } from "node:child_process";
-import { existsSync, type FSWatcher, watch } from "node:fs";
+import { type FSWatcher, watch } from "node:fs";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
-import type { gitChangesRpc } from "../shared/git-contracts";
+import type { gitChangesRpc } from "../shared/git-contracts.ts";
+import { runGitProcess } from "./git-process.ts";
 
-const GIT_COMMAND = process.platform === "win32" ? "git.exe" : "git";
 // Plugin RPCs time out at 30s (packages/server/src/server/plugins/runtime.ts REQUEST_TIMEOUT_MS)
 const LONG_POLL_MS = 20_000;
 // A burst of writes (a save, a checkout, a build) settles into one change
@@ -12,9 +12,15 @@ const SETTLE_MS = 250;
 // shortcut: watchers live while polled and close after this idle time, raise if reopening is slow
 const IDLE_CLOSE_MS = 120_000;
 const SWEEP_INTERVAL_MS = 30_000;
+// Files in a git directory whose writes move HEAD, a branch, or another ref
+const REF_FILES = new Set(["HEAD", "ORIG_HEAD", "FETCH_HEAD", "packed-refs"]);
 
 interface WorktreeWatch {
   version: number;
+  /** The version at which HEAD, a branch, or another ref last changed */
+  refsVersion: number;
+  /** Whether the writes the settle timer waits on touched refs */
+  settleTouchesRefs: boolean;
   watchers: FSWatcher[];
   waiters: Set<() => void>;
   lastPolled: number;
@@ -25,12 +31,28 @@ const watches = new Map<string, WorktreeWatch>();
 const pending = new Map<string, Promise<WorktreeWatch>>();
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
-function absoluteGitDirectory(worktree: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile(GIT_COMMAND, ["rev-parse", "--absolute-git-dir"], { cwd: worktree, windowsHide: true, encoding: "utf8" }, (error, stdout) =>
-      resolve(error ? null : stdout.trim()),
-    );
-  });
+async function absoluteGitDirectory(worktree: string): Promise<string | null> {
+  const result = await runGitProcess(worktree, ["rev-parse", "--absolute-git-dir"], { background: true }).catch(() => null);
+  return result && !result.error ? result.stdout.trim() : null;
+}
+
+/**
+ * What a watcher event means. `filename` is relative to the watched directory: the worktree, where
+ * git's files sit under `.git/`, or a git directory outside it (`inGitDirectory`). Object writes are
+ * ignored, since they only accompany index or ref writes seen anyway. A null name could be anything.
+ */
+export function watchEventKind(filename: string | null, inGitDirectory: boolean): "ignore" | "files" | "refs" {
+  if (filename === null) return "refs";
+  let name = filename.replace(/\\/g, "/");
+  if (!inGitDirectory) {
+    if (!name.startsWith(".git/")) return "files";
+    name = name.slice(".git/".length);
+  }
+  if (name === "objects" || name.startsWith("objects/")) return "ignore";
+  if (REF_FILES.has(name) || name === "refs" || name.startsWith("refs/") || name === "logs" || name.startsWith("logs/")) {
+    return "refs";
+  }
+  return "files";
 }
 
 function closeWatch(key: string, entry: WorktreeWatch): void {
@@ -41,11 +63,14 @@ function closeWatch(key: string, entry: WorktreeWatch): void {
   watches.delete(key);
 }
 
-function changed(entry: WorktreeWatch): void {
+function changed(entry: WorktreeWatch, refs: boolean): void {
+  entry.settleTouchesRefs ||= refs;
   if (entry.settleTimer) clearTimeout(entry.settleTimer);
   entry.settleTimer = setTimeout(() => {
     entry.settleTimer = null;
     entry.version++;
+    if (entry.settleTouchesRefs) entry.refsVersion = entry.version;
+    entry.settleTouchesRefs = false;
     for (const wake of entry.waiters) wake();
     entry.waiters.clear();
   }, SETTLE_MS);
@@ -56,9 +81,12 @@ function changed(entry: WorktreeWatch): void {
  * worktree lives outside it, so staging and commits count as changes too
  */
 async function openWatch(key: string): Promise<WorktreeWatch> {
+  // Start from the clock so a restarted daemon never repeats a version a client holds
+  const version = Date.now();
   const entry: WorktreeWatch = {
-    // Start from the clock so a restarted daemon never repeats a version a client holds
-    version: Date.now(),
+    version,
+    refsVersion: version,
+    settleTouchesRefs: false,
     watchers: [],
     waiters: new Set(),
     lastPolled: Date.now(),
@@ -69,7 +97,11 @@ async function openWatch(key: string): Promise<WorktreeWatch> {
   if (gitDirectory && path.relative(key, gitDirectory).startsWith("..")) directories.push(gitDirectory);
   for (const directory of directories) {
     try {
-      const watcher = watch(directory, { recursive: true }, () => changed(entry));
+      const inGitDirectory = directory !== key;
+      const watcher = watch(directory, { recursive: true }, (_event, filename) => {
+        const kind = watchEventKind(filename, inGitDirectory);
+        if (kind !== "ignore") changed(entry, kind === "refs");
+      });
       // A watcher that dies (directory removed) ends the watch; the next poll reopens it
       watcher.on("error", () => closeWatch(key, entry));
       entry.watchers.push(watcher);
@@ -107,10 +139,14 @@ export async function waitForChanges({
   worktree,
   version,
 }: RpcInput<typeof gitChangesRpc>): Promise<RpcOutput<typeof gitChangesRpc>> {
-  if (!existsSync(worktree)) throw new Error(`Worktree does not exist: ${worktree}`);
+  try {
+    await stat(worktree);
+  } catch {
+    throw new Error(`Worktree does not exist: ${worktree}`);
+  }
   const entry = await ensureWatch(worktree);
   entry.lastPolled = Date.now();
-  if (version !== entry.version) return { version: entry.version };
+  if (version !== entry.version) return { version: entry.version, refsVersion: entry.refsVersion };
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
       entry.waiters.delete(wake);
@@ -123,7 +159,7 @@ export async function waitForChanges({
     entry.waiters.add(wake);
   });
   entry.lastPolled = Date.now();
-  return { version: entry.version };
+  return { version: entry.version, refsVersion: entry.refsVersion };
 }
 
 /** Closes every watcher; the plugin's cleanup calls this */

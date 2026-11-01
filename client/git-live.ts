@@ -4,14 +4,19 @@ import { useEffect, useMemo } from "react";
 import { gitChangesRpc, gitStatusRpc, gitWorktreesRpc } from "../shared/git-contracts";
 import { changeColorsByPath } from "./change-list";
 import { publishGitStatus } from "./change-registry";
+import { isSameOrInsideAbsolute } from "./tree-model";
 
 export const GIT_QUERY_KEY = ["better-tree", "git"] as const;
 // File events drive refreshes; these slower polls only catch what the watcher cannot see, such as
 // other worktrees changing. They keep running while the window is unfocused
 export const GIT_REFRESH_MS = 30_000;
+/** Git data older than this refetches when a hidden panel shows again */
+export const GIT_STALE_MS = 2000;
+/** How often an open diff rereads its file and HEAD's copy; a prefetched diff stays fresh this long */
+export const DIFF_REFRESH_MS = 4000;
 const CHANGE_RETRY_MS = 2000;
 
-type WaitForChanges = (input: { worktree: string; version: number }) => Promise<{ version: number }>;
+type WaitForChanges = (input: { worktree: string; version: number }) => Promise<{ version: number; refsVersion: number }>;
 
 // One long-poll per worktree however many panels watch it, so a change refreshes the cache once
 const changeLoops = new Map<string, { subscribers: number; stop(): void }>();
@@ -24,9 +29,31 @@ function startChangeLoop(worktree: string, waitForChanges: WaitForChanges, query
       try {
         const result = await waitForChanges({ worktree, version });
         if (stopped) return;
-        // The first answer only establishes the version; later ones mean something changed
+        // The first answer only establishes the version; later ones mean something in this worktree changed
         if (version !== 0 && result.version !== version) {
-          await queryClient.invalidateQueries({ queryKey: GIT_QUERY_KEY });
+          // History and branch lists only move with refs, so plain file edits leave them alone
+          const refsChanged = result.refsVersion > version;
+          await queryClient.invalidateQueries({
+            predicate: ({ queryKey }) => {
+              if (queryKey[0] !== "better-tree") return false;
+              if (queryKey[1] === "diff-sources") {
+                return typeof queryKey[2] === "string" && isSameOrInsideAbsolute(queryKey[2], worktree);
+              }
+              if (queryKey[1] !== "git") return false;
+              switch (queryKey[2]) {
+                case "status":
+                case "summary":
+                case "diff":
+                  return queryKey[3] === worktree;
+                case "log":
+                  return refsChanged && queryKey[3] === worktree;
+                case "worktrees":
+                  return refsChanged;
+                default:
+                  return false;
+              }
+            },
+          });
         }
         version = result.version;
       } catch {
@@ -42,7 +69,8 @@ function startChangeLoop(worktree: string, waitForChanges: WaitForChanges, query
 
 /**
  * Event-driven refresh: the daemon watches the worktree and answers this long-poll as soon as a
- * file (or the index, HEAD, refs) changes; every Git query is then refetched
+ * file (or the index, HEAD, refs) changes; that worktree's changes, totals, and diffs are then
+ * refetched, and its history and every branch list too when refs moved
  */
 export function useGitChangeRefresh(worktree: string | null): void {
   const waitForChanges = useRpc(gitChangesRpc);
@@ -78,6 +106,8 @@ export function useGitChangeColors(directory: string | null, enabled: boolean): 
     enabled: enabled && directory !== null,
     refetchInterval: GIT_REFRESH_MS,
     refetchIntervalInBackground: true,
+    staleTime: GIT_STALE_MS,
+    retry: 1,
   });
   const worktree = enabled
     ? (worktrees.data?.worktrees.find((candidate) => candidate.current && !candidate.missing)?.path ?? null)
@@ -88,6 +118,8 @@ export function useGitChangeColors(directory: string | null, enabled: boolean): 
     enabled: worktree !== null,
     refetchInterval: GIT_REFRESH_MS,
     refetchIntervalInBackground: true,
+    staleTime: GIT_STALE_MS,
+    retry: 1,
   });
   useGitChangeRefresh(worktree);
   const files = status.data?.files;

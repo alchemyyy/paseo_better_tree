@@ -53,6 +53,7 @@ import {
 import { diffSourcesRpc } from "./shared/diff-contracts";
 import { diffSources } from "./server/diff-sources";
 import { stopGitWatches, waitForChanges } from "./server/git-watch";
+import { stopGitProcesses } from "./server/git-process";
 import { stopGitObjectReaders } from "./server/object-reader";
 import { moveEntry } from "./server/move";
 import { copyEntry, createEntry, renameEntry } from "./server/entry-ops";
@@ -110,6 +111,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(diffSourcesRpc, diffSources);
   return () => {
     stopGitWatches();
-    stopGitObjectReaders();
+    stopGitProcesses();
+    // The readers' git processes exit before the plugin process does
+    return stopGitObjectReaders();
   };
 }

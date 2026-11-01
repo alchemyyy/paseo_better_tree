@@ -41,6 +41,7 @@ import {
   type Worktree,
   type WorktreeSummary,
 } from "../shared/git-contracts";
+import { diffSourcesRpc } from "../shared/diff-contracts";
 import {
   buildChangeRows,
   type ChangeCategory,
@@ -65,13 +66,14 @@ import { useExclusivePane } from "./exclusive-pane";
 import { revealInTree, useStockViews } from "./stock-views";
 import { REPOSITORY_COLOR, STAGED_COLOR, TRACKED_COLOR, UNTRACKED_COLOR } from "./git-colors";
 import { DEFAULT_GIT_TAB_STATE, type FileFilter, GitTabStateSchema, type GitTabState } from "./git-focus";
-import { GIT_QUERY_KEY, GIT_REFRESH_MS, useGitChangeRefresh } from "./git-live";
+import { DIFF_REFRESH_MS, GIT_QUERY_KEY, GIT_REFRESH_MS, GIT_STALE_MS, useGitChangeRefresh } from "./git-live";
 import { formatRelativeTime } from "./git-model";
 import { useStaging } from "./git-staging";
 import { findPaneBridge } from "./host-bridge";
 import { findLayoutStore } from "./layout-guard";
 import { LineTotals } from "./line-totals";
 import { placeRemoteMenu, RemoteButton, RemoteMenu, type RemoteMenuPlacement } from "./remote-actions";
+import { useOnScreen } from "./on-screen";
 import { TREE_PANEL_ID } from "./panel-ids";
 import { SplitSections } from "./split-sections";
 import { baseName, joinPath, normalizeAbsolute } from "./tree-model";
@@ -79,6 +81,13 @@ import { useMainTreeRoot } from "./tree-views";
 import { attachGitRowContextMenu, gitRowDataProps } from "./web";
 
 const CLOCK_TICK_MS = 30_000;
+// Other worktrees' totals only change when they are worked on elsewhere, so they poll slowly
+const SUMMARY_REFRESH_MS = 60_000;
+// The repositories search walks the root folder
+const REPOSITORIES_REFRESH_MS = 5 * 60_000;
+const REPOSITORIES_STALE_MS = 60_000;
+// A pointer resting this long on a changed file loads its diff before the click
+const DIFF_PREFETCH_DELAY_MS = 120;
 const FONT_SIZE = 13;
 const SMALL_FONT_SIZE = 11;
 const ICON_SIZE = 14;
@@ -128,6 +137,8 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
       ? tabState.repository
       : null;
   useExclusivePane(rootRef, { panelId: TREE_PANEL_ID, position: "bottom" });
+  // A panel of another workspace or a background tab stays mounted; it stops polling while hidden
+  const onScreen = useOnScreen(rootRef);
   // Paseo's own file tree and Changes opens go to this plugin's tree and Git panel, even while
   // only this panel is mounted
   useStockViews(rootRef);
@@ -171,6 +182,7 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
   const openInFileBrowser = useRpc(openInFileBrowserRpc);
   const loadRepositories = useRpc(gitRepositoriesRpc);
   const loadSummary = useRpc(gitWorktreeSummaryRpc);
+  const loadDiffSources = useRpc(diffSourcesRpc);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
@@ -183,9 +195,11 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
   const worktrees = useQuery({
     queryKey: [...GIT_QUERY_KEY, "worktrees", shownFolder],
     queryFn: () => loadWorktrees({ root: shownFolder ?? "" }),
-    enabled: typeof shownFolder === "string",
+    enabled: typeof shownFolder === "string" && onScreen,
     refetchInterval: GIT_REFRESH_MS,
     refetchIntervalInBackground: true,
+    staleTime: GIT_STALE_MS,
+    retry: 1,
   });
   const worktreeList = worktrees.data?.worktrees ?? [];
   // A root folder in no repository lists the repositories inside it, so only then does the search run
@@ -194,8 +208,10 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
   const rootRepositories = useQuery({
     queryKey: ["better-tree", "directory", treeRoot, { repositories: true }],
     queryFn: () => loadRepositories({ root: treeRoot ?? "" }),
-    enabled: listsRepositories && typeof treeRoot === "string",
-    refetchInterval: GIT_REFRESH_MS,
+    enabled: listsRepositories && typeof treeRoot === "string" && onScreen,
+    refetchInterval: REPOSITORIES_REFRESH_MS,
+    staleTime: REPOSITORIES_STALE_MS,
+    retry: 1,
   });
   const selected =
     worktreeList.find((worktree) => worktree.path === tabState.worktree && !worktree.missing) ??
@@ -206,16 +222,20 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
   const status = useQuery({
     queryKey: [...GIT_QUERY_KEY, "status", selectedPath],
     queryFn: () => loadStatus({ worktree: selectedPath ?? "" }),
-    enabled: selectedPath !== null,
+    enabled: selectedPath !== null && onScreen,
     refetchInterval: GIT_REFRESH_MS,
     refetchIntervalInBackground: true,
+    staleTime: GIT_STALE_MS,
+    retry: 1,
   });
   const log = useQuery({
     queryKey: [...GIT_QUERY_KEY, "log", selectedPath],
     queryFn: () => loadLog({ worktree: selectedPath ?? "" }),
-    enabled: selectedPath !== null,
+    enabled: selectedPath !== null && onScreen,
     refetchInterval: GIT_REFRESH_MS,
     refetchIntervalInBackground: true,
+    staleTime: GIT_STALE_MS,
+    retry: 1,
   });
   useEffect(() => {
     if (selectedPath && status.data) publishGitStatus(selectedPath, status.data.files);
@@ -227,9 +247,11 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
     queries: summaryPaths.map((worktree) => ({
       queryKey: [...GIT_QUERY_KEY, "summary", worktree],
       queryFn: () => loadSummary({ worktree }),
-      enabled: status.data !== undefined || status.isError,
-      refetchInterval: GIT_REFRESH_MS,
-      refetchIntervalInBackground: true,
+      enabled: (status.data !== undefined || status.isError) && onScreen,
+      refetchInterval: SUMMARY_REFRESH_MS,
+      refetchIntervalInBackground: false,
+      staleTime: SUMMARY_REFRESH_MS,
+      retry: 1,
     })),
   });
   const summaries = new Map<string, WorktreeSummary>();
@@ -257,7 +279,7 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
     [queryClient],
   );
 
-  useGitChangeRefresh(selectedPath);
+  useGitChangeRefresh(onScreen ? selectedPath : null);
 
   const openDiff = useCallback(
     (file: GitFile) => {
@@ -277,6 +299,21 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
       );
     },
     [selectedPath, toast],
+  );
+
+  // Same key and path as the diff tab's query, so a file clicked after the pointer rested on it
+  // opens from the cache
+  const prefetchDiff = useCallback(
+    (file: GitFile) => {
+      if (!selectedPath) return;
+      const absolutePath = joinPath(selectedPath, file.path);
+      void queryClient.prefetchQuery({
+        queryKey: ["better-tree", "diff-sources", absolutePath],
+        queryFn: () => loadDiffSources({ path: absolutePath }),
+        staleTime: DIFF_REFRESH_MS,
+      });
+    },
+    [selectedPath, queryClient, loadDiffSources],
   );
 
   const openCommit = useCallback(
@@ -632,6 +669,7 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
             onFoldersChange={(folders) => updateListDisplay({ changesFolders: folders })}
             onSetStaged={onSetStaged}
             onOpen={openDiff}
+            onPrefetch={prefetchDiff}
             onRowMenu={longPressChange}
           />,
           commitSection,
@@ -1032,6 +1070,7 @@ function FilesSection({
   onFoldersChange,
   onSetStaged,
   onOpen,
+  onPrefetch,
   onRowMenu,
 }: {
   files: readonly GitFile[];
@@ -1047,6 +1086,8 @@ function FilesSection({
   onFoldersChange(folders: boolean): void;
   onSetStaged(paths: readonly string[], staged: boolean): void;
   onOpen(file: GitFile): void;
+  /** The pointer rested on a file row; loads its diff ahead of a click */
+  onPrefetch(file: GitFile): void;
   /** Long press on a file or folder row opens its menu; right-click is handled by the panel */
   onRowMenu(key: string, event: GestureResponderEvent): void;
 }) {
@@ -1130,12 +1171,13 @@ function FilesSection({
               styles={styles}
               onSetStaged={onSetStaged}
               onOpen={onOpen}
+              onPrefetch={onPrefetch}
               onRowMenu={onRowMenu}
             />
           );
       }
     },
-    [folders, families, theme, styles, toggleCollapsed, onSetStaged, onOpen, onRowMenu],
+    [folders, families, theme, styles, toggleCollapsed, onSetStaged, onOpen, onPrefetch, onRowMenu],
   );
   let body: ReactNode;
   if (error) body = <Text style={styles.message}>{error}</Text>;
@@ -1240,6 +1282,7 @@ const FileRow = memo(function FileRow({
   styles,
   onSetStaged,
   onOpen,
+  onPrefetch,
   onRowMenu,
 }: {
   rowKey: string;
@@ -1251,8 +1294,11 @@ const FileRow = memo(function FileRow({
   styles: Styles;
   onSetStaged(paths: readonly string[], staged: boolean): void;
   onOpen(file: GitFile): void;
+  onPrefetch(file: GitFile): void;
   onRowMenu(key: string, event: GestureResponderEvent): void;
 }) {
+  const prefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(prefetchTimer.current), []);
   return (
     <View {...gitRowDataProps("change", rowKey)} style={[styles.compactRow, { paddingLeft: ROW_INSET + depth * INDENT_WIDTH }]}>
       <Checkbox
@@ -1267,6 +1313,11 @@ const FileRow = memo(function FileRow({
         accessibilityRole="button"
         accessibilityLabel={`Open diff for ${file.path}`}
         onPress={() => onOpen(file)}
+        onHoverIn={() => {
+          clearTimeout(prefetchTimer.current);
+          prefetchTimer.current = setTimeout(() => onPrefetch(file), DIFF_PREFETCH_DELAY_MS);
+        }}
+        onHoverOut={() => clearTimeout(prefetchTimer.current)}
         onLongPress={(event) => onRowMenu(rowKey, event)}
         style={({ pressed }) => [styles.fileButton, pressed ? styles.rowPressed : null]}
       >

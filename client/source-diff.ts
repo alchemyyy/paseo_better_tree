@@ -25,6 +25,7 @@ interface DomNode {
   remove(): void;
   setAttribute(name: string, value: string): void;
   addEventListener(type: string, listener: () => void): void;
+  getClientRects(): ArrayLike<unknown>;
 }
 interface ComputedStyle {
   backgroundColor: string;
@@ -74,6 +75,8 @@ interface Augmented {
   sources: { original: string; current: string } | null;
   leaveSplit: (() => void) | null;
   refreshTimer: ReturnType<typeof setInterval> | null;
+  /** A refresh load is in flight; ticks skip until it settles */
+  refreshing: boolean;
 }
 
 /** Last mode per file, so a tab that remounts (or reopens) keeps its view */
@@ -275,15 +278,21 @@ export function startSourceDiff(
       entry.leaveSplit = joinSplit(entry.fileKey, "current", handle, () => entry.sources ?? { original: "", current: "" });
       openOriginalSide(entry.bar, entry.fileKey, sources.absolutePath);
     }
-    // Agents edit files underneath; keep the diff current
+    // Agents edit files underneath; keep the diff current while the toolbar is on screen (not in
+    // another workspace or a background tab), one load at a time
     entry.refreshTimer = setInterval(() => {
+      if (entry.refreshing || entry.bar.getClientRects().length === 0) return;
+      entry.refreshing = true;
       void loadSources(entry.path, entry.workspaceId)
         .then((next) => {
           if (generation !== entry.generation || next.current === null || next.original === null) return;
           entry.sources = { original: next.original, current: next.current };
           entry.handle?.setSources(next.original, next.current);
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => {
+          entry.refreshing = false;
+        });
     }, REFRESH_INTERVAL_MS);
   };
 
@@ -310,6 +319,7 @@ export function startSourceDiff(
       sources: null,
       leaveSplit: null,
       refreshTimer: null,
+      refreshing: false,
     };
     select.addEventListener("change", () => void setMode(entry, select.value as DiffMode));
     augmented.set(bar, entry);
