@@ -17,6 +17,9 @@ import {
 import {
   gitChangesRpc,
   gitCheckoutRpc,
+  gitCommitDetailsRpc,
+  gitCommitFileDiffRpc,
+  gitCommitFileRpc,
   gitCommitRpc,
   gitDiffRpc,
   gitIgnoreRpc,
@@ -33,6 +36,9 @@ import {
 import {
   checkoutCommit,
   commit,
+  commitDetails,
+  commitFileDiff,
+  commitFileSources,
   commitLog,
   fileDiff,
   ignorePath,
@@ -47,6 +53,7 @@ import {
 import { diffSourcesRpc } from "./shared/diff-contracts";
 import { diffSources } from "./server/diff-sources";
 import { stopGitWatches, waitForChanges } from "./server/git-watch";
+import { stopGitObjectReaders } from "./server/object-reader";
 import { moveEntry } from "./server/move";
 import { copyEntry, createEntry, renameEntry } from "./server/entry-ops";
 import { trashEntry } from "./server/trash";
@@ -90,6 +97,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(gitStageRpc, setStaged);
   server.handle(gitDiffRpc, fileDiff);
   server.handle(gitLogRpc, commitLog);
+  server.handle(gitCommitDetailsRpc, commitDetails);
+  server.handle(gitCommitFileRpc, commitFileSources);
+  server.handle(gitCommitFileDiffRpc, commitFileDiff);
   server.handle(gitCheckoutRpc, checkoutCommit);
   server.handle(gitChangesRpc, waitForChanges);
   server.handle(gitCommitRpc, commit);
@@ -98,5 +108,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(gitIgnoreRpc, ignorePath);
   server.handle(gitRevertRpc, changingFiles(revertChanges));
   server.handle(diffSourcesRpc, diffSources);
-  return () => stopGitWatches();
+  return () => {
+    stopGitWatches();
+    stopGitObjectReaders();
+  };
 }

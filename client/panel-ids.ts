@@ -22,3 +22,11 @@ export const DIFF_PANEL_IDS: readonly string[] = Array.from(
   { length: DIFF_SLOT_COUNT },
   (_, index) => `diff-${index + 1}`,
 );
+
+// Each commit opens in its own Commit tab, from a smaller pool: opening one past it reuses the
+// tab whose commit was opened longest ago
+export const COMMIT_SLOT_COUNT = 6;
+export const COMMIT_PANEL_IDS: readonly string[] = Array.from(
+  { length: COMMIT_SLOT_COUNT },
+  (_, index) => `commit-${index + 1}`,
+);

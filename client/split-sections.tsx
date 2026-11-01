@@ -1,62 +1,9 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { type LayoutChangeEvent, PanResponder, View, type ViewStyle } from "react-native";
+import { type ReactNode, useMemo, useRef, useState } from "react";
+import { type LayoutChangeEvent, View } from "react-native";
 import { resizeFractions } from "./git-model";
-import { attachVerticalDrag } from "./web";
-
-const HANDLE_HEIGHT = 8;
-// RN's ViewStyle cursor type only lists auto/pointer; react-native-web accepts any CSS cursor
-const RESIZE_CURSOR = { cursor: "row-resize" } as unknown as ViewStyle;
-
-interface DragCallbacks {
-  onStart(): void;
-  onMove(deltaY: number): void;
-  onEnd(): void;
-}
-
-/** Divider that reports vertical drags: DOM pointer capture on web, PanResponder on native */
-function Divider({ theme, callbacks }: { theme: PluginTheme; callbacks: DragCallbacks }) {
-  const nodeRef = useRef<View>(null);
-  const callbacksRef = useRef(callbacks);
-  callbacksRef.current = callbacks;
-  const [webAttached, setWebAttached] = useState(false);
-  useEffect(() => {
-    const detach = attachVerticalDrag(nodeRef.current, {
-      onStart: () => callbacksRef.current.onStart(),
-      onMove: (deltaY) => callbacksRef.current.onMove(deltaY),
-      onEnd: () => callbacksRef.current.onEnd(),
-    });
-    setWebAttached(detach !== null);
-    return detach ?? undefined;
-  }, []);
-  const responder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderTerminationRequest: () => false,
-        onPanResponderGrant: () => callbacksRef.current.onStart(),
-        onPanResponderMove: (_event, gesture) => callbacksRef.current.onMove(gesture.dy),
-        onPanResponderRelease: () => callbacksRef.current.onEnd(),
-        onPanResponderTerminate: () => callbacksRef.current.onEnd(),
-      }),
-    [],
-  );
-  return (
-    <View
-      ref={nodeRef}
-      {...(webAttached ? {} : responder.panHandlers)}
-      accessibilityRole="adjustable"
-      accessibilityLabel="Resize sections"
-      style={[
-        { height: HANDLE_HEIGHT, justifyContent: "center", backgroundColor: theme.colors.surface0 },
-        RESIZE_CURSOR,
-      ]}
-    >
-      <View style={{ height: 1, backgroundColor: theme.colors.border }} />
-    </View>
-  );
-}
+import { DIVIDER_SIZE, ResizeDivider } from "./resize-divider";
+import type { DragHandlers } from "./web";
 
 /** Vertical stack of sections with draggable dividers; fractions sum to 1 */
 export function SplitSections({
@@ -83,7 +30,7 @@ export function SplitSections({
   const dividerCallbacks = useMemo(
     () =>
       sections.slice(0, -1).map(
-        (_, index): DragCallbacks => ({
+        (_, index): DragHandlers => ({
           onStart: () => {
             dragRef.current = { start: fractionsRef.current, latest: null };
           },
@@ -105,7 +52,7 @@ export function SplitSections({
   );
 
   const handleLayout = (event: LayoutChangeEvent) => {
-    const dividers = Math.max(0, sections.length - 1) * HANDLE_HEIGHT;
+    const dividers = Math.max(0, sections.length - 1) * DIVIDER_SIZE;
     sectionsHeightRef.current = Math.max(1, event.nativeEvent.layout.height - dividers);
   };
 
@@ -121,7 +68,11 @@ export function SplitSections({
       </View>,
     );
     const callbacks = dividerCallbacks[index];
-    if (callbacks) children.push(<Divider key={`divider-${index}`} theme={theme} callbacks={callbacks} />);
+    if (callbacks) {
+      children.push(
+        <ResizeDivider key={`divider-${index}`} axis="y" theme={theme} accessibilityLabel="Resize sections" handlers={callbacks} />,
+      );
+    }
   });
 
   return (

@@ -1,6 +1,6 @@
 # Better tree
 
-Paseo plugin that adds a VS Code-style file tree, a Git panel, and diff views to Paseo workspaces.
+Paseo plugin that adds a VS Code-style file tree, a Git panel, diff views, and commit views to Paseo workspaces.
 
 ## Install
 
@@ -38,7 +38,7 @@ Paseo plugin that adds a VS Code-style file tree, a Git panel, and diff views to
 - Changes list with line totals, stage/unstage checkboxes per file, folder, and category, a Tracked/Untracked filter, and Group and Folders toggles. Clicking a file opens its diff. Its context menu (right-click/long-press on a file or folder): **Go to file** / **Go to folder**, Show in file explorer, Add to .gitignore, Revert.
 - **Go to file** selects the file in the main file tree and gives the tree the keyboard: the folders above it open, the tree scrolls to it, and the tree comes into view, opening if it is closed. A deleted file leaves the folder it was in selected, with a note; a file outside the tree's root folder only gets a note.
 - Commit editor: Commit (staged), Commit Tracked, or Amend; Ctrl+Enter (Cmd+Enter) commits; full-screen message editor; Fetch, Pull, Push.
-- History: relative commit times and branch labels, uncommit (keeps changes staged), and check out a commit: switch to a branch at it, detached HEAD, or a new worktree beside the current one.
+- History: relative commit times and branch labels, uncommit (keeps changes staged), and check out a commit: switch to a branch at it, detached HEAD, or a new worktree beside the current one. Clicking a commit opens it in a Commit tab (below).
 - Refreshes live: the daemon watches each worktree and its git directory and answers a long-poll on change.
 - **Focus git repo** in the tree's menu shows that repository in the Git panel, opening the panel if it is closed, and selects the folder's own worktree. A bar at the top of the panel names a repository focused this way or picked from the list; its X goes back to the root folder's repository or list. Changing the main tree's root folder drops the focus; otherwise the panel keeps it across restarts.
 - Stands in for Paseo's own Changes view: the composer's Changes pill and every other way Paseo opens Changes (keyboard shortcuts, the command palette, the new-tab menu) open the Git panel instead, and Explorer's Changes tab is closed whenever the dock is on screen. Phones keep Paseo's Changes.
@@ -47,6 +47,14 @@ Paseo plugin that adds a VS Code-style file tree, a Git panel, and diff views to
 
 - **Diff** tabs show a file against HEAD as Unified, Changes only, or Split (original side in a pane to the right, scroll-synced). Tabs are labeled with the file name, colored by change.
 - Paseo's own file editor gets a view selector beside "Ln, Col": Source, Unified diff, Changes only, Split diff. The last choice per file is remembered.
+
+### Commits
+
+- Clicking a commit in History opens it in a **Commit** tab where files open (better-chat-management's file area when that plugin runs), labeled with the commit's subject, with its id in the tooltip. Clicking the commit again reveals its tab. Up to six commits stay open at once; opening another reuses the tab whose commit was opened longest ago. Commit tabs move, split, close, and reopen across restarts like file tabs.
+- The tab shows the commit's subject, id (with a copy button), author, date, file count, line totals, and message, then splits like editor-enhancements' Markdown Split: the files the commit changed, as a tree of folders, beside an editor view of the selected file. Drag the divider to resize (10-90%, kept for every Commit tab); on phones the tree sits above the editor view.
+- The tree uses the file tree's file icons, row spacing, text weight, and text size. Each file is colored by its change (new green, edited amber, deleted red and struck through), shows its old name when renamed, its line totals, and its change letter (A, M, D, R, C, T). A chain of folders holding one folder each shows as one row; clicking a folder opens or closes it. Clicking a file shows it, and the tab remembers the file and view.
+- The editor view compares the file with the commit's first parent (the header says so for a merge; a first commit compares with nothing): **Unified**, **Changes only**, **Split** (parent on the left, commit on the right, scroll-synced), or **File** (the file at the commit, or for a deletion the text it deleted, changed lines marked). Binary files and files over 4 MB show a note instead.
+- Everything comes from the local repository, never a remote. File texts are read through one `git cat-file --batch` kept running per worktree while you browse (it exits after a minute unused), since starting git for every file takes tens to hundreds of milliseconds on Windows.
 
 ### Settings and layout
 
@@ -57,12 +65,12 @@ Settings > Better tree (stored per host):
 - **Open the Git panel** (on): opens Git below the file tree in every workspace, once per workspace per session.
 - Reset buttons for row spacing, text weight, and text size.
 
-Pane arrangement and sizes of the tree and Git panes, Explorer width, and Git section heights are saved and applied to every workspace. Dragging a divider of the tree, Git, or file-area pane resizes it in every workspace at once, not just when you next switch to one. The tree and Git panes keep the same widths everywhere: in a workspace without a Git pane or without the better-chat-management plugin's file area, the chat side takes up the missing pane's space, and a drag there leaves the missing pane's saved place and size alone.
+Pane arrangement and sizes of the tree and Git panes, Explorer width, Git section heights, and the changes tree's share of Commit tabs are saved and applied to every workspace. Dragging a divider of the tree, Git, or file-area pane resizes it in every workspace at once, not just when you next switch to one. The tree and Git panes keep the same widths everywhere: in a workspace without a Git pane or without the better-chat-management plugin's file area, the chat side takes up the missing pane's space, and a drag there leaves the missing pane's saved place and size alone.
 
 ## Limitations
 
 - Paseo's plugin SDK cannot open file tabs, split panes, or relabel tabs, so the plugin reads Paseo's internal pane context and layout store and patches its tab strip and file toolbar DOM. A Paseo update can break these parts.
-- The CodeMirror diff view, toolbar selector, tab labels, and keyboard shortcuts work on web/desktop only; native clients get a plain line diff.
+- The CodeMirror diff view, toolbar selector, tab labels, and keyboard shortcuts work on web/desktop only; native clients get a plain line diff in Diff and Commit tabs.
 - The tree polls expanded folders rather than watching them.
 
 ## Development

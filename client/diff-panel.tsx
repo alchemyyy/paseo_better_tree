@@ -2,25 +2,20 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { type PluginWorkspacePanelProps, useRpc, useTabState } from "@getpaseo/plugin/client";
 import { FlatList, Loading } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
-import { Platform, Pressable, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { Platform, Text, View } from "react-native";
 import { z } from "zod";
 import { diffSourcesRpc } from "../shared/diff-contracts";
 import { gitDiffRpc } from "../shared/git-contracts";
 import { codemirror } from "./codemirror";
-import { DIFF_CONFIG, type DiffViewHandle, type EditorLook, mountDiffView } from "./diff-editor";
+import { DIFF_CONFIG } from "./diff-editor";
 import { DiffTabStateSchema } from "./diff-tabs";
+import { DiffLineView, lookFromTheme, ModeSelector, useMountedDiff } from "./diff-views";
 import { closeOriginalSide, openOriginalSide } from "./split-panes";
-import { joinSplit } from "./split-sync";
 import { joinPath } from "./tree-model";
-import { ADDITION_BACKGROUND, DELETION_BACKGROUND, HUNK_BACKGROUND } from "./git-colors";
 import { type DiffLine, parseUnifiedDiff } from "./git-model";
 
 const REFRESH_INTERVAL_MS = 4000;
-const FONT_SIZE = 12;
-const LINE_HEIGHT = 18;
-const NUMBER_WIDTH = 44;
-const MONOSPACE = Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" });
 const NullableDiffStateSchema = DiffTabStateSchema.nullable();
 
 function basename(path: string): string {
@@ -40,27 +35,6 @@ const RICH_MODES: readonly { mode: RichMode; label: string }[] = [
   { mode: "changes", label: "Changes only" },
   { mode: "split", label: "Split" },
 ];
-const DIFF_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-
-function hexLuminance(color: string): number {
-  const hex = color.replace("#", "");
-  if (!/^[0-9a-f]{6}/i.test(hex)) return 0;
-  const [red, green, blue] = [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16));
-  return (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
-}
-
-function lookFromTheme(theme: PluginTheme): EditorLook {
-  return {
-    dark: hexLuminance(theme.colors.foreground) > hexLuminance(theme.colors.surface0),
-    background: theme.colors.surface0,
-    foreground: theme.colors.foreground,
-    mutedForeground: theme.colors.foregroundMuted,
-    gutterBackground: theme.colors.surface0,
-    fontFamily: DIFF_FONT,
-    fontSize: "12.5px",
-    lineHeight: "1.55",
-  };
-}
 
 /**
  * A file's diff against HEAD. A Git-panel tab shows unified, changes-only, or the current side of
@@ -83,45 +57,6 @@ function useDiffSources(absolutePath: string | null) {
   });
 }
 
-/** Mounts the plugin's diff view into a View and keeps its sources current */
-function useMountedDiff(
-  hostRef: React.RefObject<View | null>,
-  sources: { original: string | null; current: string | null; absolutePath: string } | undefined,
-  mode: "unified" | "changes" | "original" | "current",
-  look: EditorLook,
-  pairKey: string | null,
-) {
-  const handleRef = useRef<DiffViewHandle | null>(null);
-  const sourcesRef = useRef({ original: "", current: "" });
-  const ready = sources !== undefined && sources.original !== null && sources.current !== null;
-  const filename = sources ? basename(sources.absolutePath) : "";
-  useEffect(() => {
-    if (!ready || !sources || sources.original === null || sources.current === null) return;
-    sourcesRef.current = { original: sources.original, current: sources.current };
-    const handle = mountDiffView(hostRef.current, {
-      original: sources.original,
-      current: sources.current,
-      filename,
-      mode,
-      look,
-    });
-    handleRef.current = handle;
-    const side = mode === "original" || mode === "current" ? mode : null;
-    const leave = handle && pairKey && side ? joinSplit(pairKey, side, handle, () => sourcesRef.current) : null;
-    return () => {
-      leave?.();
-      handle?.destroy();
-      handleRef.current = null;
-    };
-    // Sources stream in through setSources below; only a new view needs a remount
-  }, [ready, filename, mode, look, pairKey]);
-  useEffect(() => {
-    if (!sources || sources.original === null || sources.current === null) return;
-    sourcesRef.current = { original: sources.original, current: sources.current };
-    handleRef.current?.setSources(sources.original, sources.current);
-  }, [sources?.original, sources?.current]);
-}
-
 function sourcesMessage(
   query: { isPending: boolean; isError: boolean; error: Error | null; data?: { original: string | null; current: string | null } },
 ): string | null {
@@ -140,7 +75,14 @@ function RichDiffPanel({ theme, tab }: PluginWorkspacePanelProps) {
   const look = useMemo(() => lookFromTheme(theme), [theme]);
   const hostRef = useRef<View>(null);
   const pairKey = absolutePath ? `diff|${absolutePath}` : null;
-  useMountedDiff(hostRef, query.data, mode === "split" ? "current" : mode, look, mode === "split" ? pairKey : null);
+  useMountedDiff(
+    hostRef,
+    query.data,
+    basename(query.data?.absolutePath ?? ""),
+    mode === "split" ? "current" : mode,
+    look,
+    mode === "split" ? pairKey : null,
+  );
 
   // Split opens the original side in a pane to the right; leaving split closes it
   useEffect(() => {
@@ -175,26 +117,7 @@ function RichDiffPanel({ theme, tab }: PluginWorkspacePanelProps) {
               <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>−{totals.deletions}</Text>
             </>
           ) : null}
-          <View style={{ flexDirection: "row", borderRadius: 6, borderWidth: 1, borderColor: theme.colors.border, overflow: "hidden" }}>
-            {RICH_MODES.map((option) => {
-              const selected = option.mode === mode;
-              return (
-                <Pressable
-                  key={option.mode}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected }}
-                  onPress={() => spec && setSpec({ ...spec, mode: option.mode })}
-                  style={{
-                    paddingHorizontal: 8,
-                    paddingVertical: 2,
-                    backgroundColor: selected ? theme.colors.surface2 : "transparent",
-                  }}
-                >
-                  <Text style={{ fontSize: 11, color: selected ? theme.colors.foreground : muted }}>{option.label}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
+          <ModeSelector options={RICH_MODES} value={mode} theme={theme} onChange={(next) => spec && setSpec({ ...spec, mode: next })} />
         </View>
       ) : null}
       {message ? (
@@ -211,7 +134,7 @@ function OriginalSidePanel({ theme, path, pairKey }: PluginWorkspacePanelProps &
   const query = useDiffSources(path);
   const look = useMemo(() => lookFromTheme(theme), [theme]);
   const hostRef = useRef<View>(null);
-  useMountedDiff(hostRef, query.data, "original", look, pairKey);
+  useMountedDiff(hostRef, query.data, basename(path), "original", look, pairKey);
   const message = sourcesMessage(query);
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
@@ -330,62 +253,3 @@ function LegacyDiffPanel({ theme, tab }: PluginWorkspacePanelProps) {
     </View>
   );
 }
-
-const DiffLineView = memo(function DiffLineView({ line, theme }: { line: DiffLine; theme: PluginTheme }) {
-  let backgroundColor: string | undefined;
-  let color = theme.colors.foreground;
-  let marker = " ";
-  switch (line.kind) {
-    case "add":
-      backgroundColor = ADDITION_BACKGROUND;
-      marker = "+";
-      break;
-    case "delete":
-      backgroundColor = DELETION_BACKGROUND;
-      marker = "-";
-      break;
-    case "hunk":
-      backgroundColor = HUNK_BACKGROUND;
-      color = theme.colors.foregroundMuted;
-      break;
-    case "meta":
-      color = theme.colors.foregroundMuted;
-      break;
-    case "context":
-      break;
-  }
-  const numberStyle = {
-    width: NUMBER_WIDTH,
-    paddingRight: 6,
-    textAlign: "right" as const,
-    color: theme.colors.foregroundMuted,
-    fontFamily: MONOSPACE,
-    fontSize: FONT_SIZE,
-    lineHeight: LINE_HEIGHT,
-  };
-  const showNumbers = line.kind !== "meta" && line.kind !== "hunk";
-  return (
-    <View style={{ flexDirection: "row", backgroundColor }}>
-      {showNumbers ? (
-        <>
-          <Text style={numberStyle}>{line.oldNumber ?? ""}</Text>
-          <Text style={numberStyle}>{line.newNumber ?? ""}</Text>
-        </>
-      ) : null}
-      <Text
-        selectable
-        style={{
-          flex: 1,
-          paddingLeft: showNumbers ? 4 : 12,
-          paddingRight: 12,
-          color,
-          fontFamily: MONOSPACE,
-          fontSize: FONT_SIZE,
-          lineHeight: LINE_HEIGHT,
-        }}
-      >
-        {showNumbers ? `${marker} ${line.text}` : line.text}
-      </Text>
-    </View>
-  );
-});

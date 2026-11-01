@@ -194,5 +194,7 @@ export const preferences = defineSettings({
     changesGrouped: z.boolean().default(false),
     /** Git changes list: files nested under their folders */
     changesFolders: z.boolean().default(false),
+    /** Commit tabs: the changes tree's share of the tab's width, or of its height on phones */
+    commitTreeShare: z.number().min(0).max(1).nullable().default(null),
   }),
 });

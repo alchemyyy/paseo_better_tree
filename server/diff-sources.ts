@@ -6,7 +6,8 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { diffSourcesRpc } from "../shared/diff-contracts";
 
 const GIT_COMMAND = process.platform === "win32" ? "git.exe" : "git";
-const MAX_TEXT_BYTES = 4 * 1024 * 1024;
+/** Files and blobs larger than this show no diff */
+export const MAX_TEXT_BYTES = 4 * 1024 * 1024;
 const GIT_ENVIRONMENT = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
 
 function git(cwd: string, args: string[]): Promise<string> {
@@ -20,7 +21,7 @@ function git(cwd: string, args: string[]): Promise<string> {
   });
 }
 
-function isText(content: string): boolean {
+export function isText(content: string): boolean {
   return !content.includes("\0");
 }
 
@@ -28,7 +29,7 @@ function isText(content: string): boolean {
  * Git compares with line endings normalized (core.autocrlf, .gitattributes), so a CRLF working
  * copy matches its LF blob; without this every line differs by a trailing \r
  */
-function normalizeLineEndings(content: string): string {
+export function normalizeLineEndings(content: string): string {
   return content.replace(/\r\n/g, "\n");
 }
 

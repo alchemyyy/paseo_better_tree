@@ -501,6 +501,7 @@ export function focusView(node: unknown): void {
 interface DomPointerEvent {
   pointerId: number;
   button: number;
+  clientX: number;
   clientY: number;
   preventDefault(): void;
   stopPropagation(): void;
@@ -510,34 +511,38 @@ interface DomCaptureElement extends DomElement {
   releasePointerCapture(pointerId: number): void;
 }
 
-export interface VerticalDragHandlers {
+/** x: a divider between side-by-side panes, dragged left and right; y: between stacked ones */
+export type DragAxis = "x" | "y";
+
+export interface DragHandlers {
   onStart(): void;
-  onMove(deltaY: number): void;
+  /** Pixels moved along the axis since the drag started */
+  onMove(delta: number): void;
   onEnd(): void;
 }
 
 /**
- * Vertical drag on a divider using pointer capture, so pane-level gesture handlers in the app
+ * Drag along `axis` on a divider using pointer capture, so pane-level gesture handlers in the app
  * cannot take the drag over. Returns null off web, where callers use PanResponder.
  */
-export function attachVerticalDrag(node: unknown, handlers: VerticalDragHandlers): (() => void) | null {
+export function attachDrag(node: unknown, axis: DragAxis, handlers: DragHandlers): (() => void) | null {
   if (Platform.OS !== "web" || !node) return null;
   const element = node as DomCaptureElement;
   let activePointer: number | null = null;
-  let startY = 0;
+  let start = 0;
   const onPointerDown = (event: DomPointerEvent) => {
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     activePointer = event.pointerId;
-    startY = event.clientY;
+    start = axis === "x" ? event.clientX : event.clientY;
     element.setPointerCapture(event.pointerId);
     handlers.onStart();
   };
   const onPointerMove = (event: DomPointerEvent) => {
     if (event.pointerId !== activePointer) return;
     event.preventDefault();
-    handlers.onMove(event.clientY - startY);
+    handlers.onMove((axis === "x" ? event.clientX : event.clientY) - start);
   };
   const onPointerEnd = (event: DomPointerEvent) => {
     if (event.pointerId !== activePointer) return;

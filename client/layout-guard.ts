@@ -4,10 +4,11 @@
 // subscribes to the store holds the store API in its hook deps.
 
 // NOTE: Explicit extension so `node --test` can load this module directly
-import { DIFF_PANEL_IDS, EXCLUSIVE_PANEL_IDS, GIT_PANEL_ID, TREE_PANEL_ID } from "./panel-ids.ts";
+import { COMMIT_PANEL_IDS, DIFF_PANEL_IDS, EXCLUSIVE_PANEL_IDS, GIT_PANEL_ID, TREE_PANEL_ID } from "./panel-ids.ts";
 import { chainSome } from "./layout-wrap.ts";
 
-const DIFF_PANEL_ID_SET: ReadonlySet<string> = new Set(DIFF_PANEL_IDS);
+/** This plugin's panels that open where files open: diff and commit tabs */
+const FILE_VIEW_PANEL_IDS: ReadonlySet<string> = new Set([...DIFF_PANEL_IDS, ...COMMIT_PANEL_IDS]);
 const TREE_PANEL_ID_SET: ReadonlySet<string> = new Set([TREE_PANEL_ID]);
 // Paseo's built-in Explorer views (Files, Changes, pull request); the tree and Git panel stand in
 // for the first two
@@ -472,9 +473,9 @@ export function openFileInFileArea(store: LayoutStoreApi, workspaceKey: string, 
   return true;
 }
 
-/** A file tab, or one of this plugin's diff tabs */
+/** A file tab, or one of this plugin's diff or commit tabs */
 function isFileView(tab: LayoutTab, pluginId: string): boolean {
-  return tab.target.kind === "file" || isPluginPanelTab(tab, pluginId, DIFF_PANEL_ID_SET);
+  return tab.target.kind === "file" || isPluginPanelTab(tab, pluginId, FILE_VIEW_PANEL_IDS);
 }
 
 /** better-chat-management's file area (the side pane, created if absent), never one of our panes */

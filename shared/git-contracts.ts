@@ -64,6 +64,40 @@ export const CheckoutActionSchema = z.enum(["switch-branch", "checkout-detached"
 export type CheckoutAction = z.infer<typeof CheckoutActionSchema>;
 
 const WorktreeInputSchema = z.object({ worktree: z.string().min(1) });
+const CommitShaSchema = z.string().regex(/^[0-9a-f]{7,64}$/);
+
+export const CommitFileStatusSchema = z.enum(["added", "modified", "deleted", "renamed", "copied", "type-changed"]);
+export type CommitFileStatus = z.infer<typeof CommitFileStatusSchema>;
+
+export const CommitFileSchema = z.object({
+  /** Path in the commit (a deleted file's path in its parent), relative to the top level, forward slashes */
+  path: z.string(),
+  /** A renamed or copied file's path in the parent */
+  previousPath: z.string().nullable(),
+  status: CommitFileStatusSchema,
+  additions: z.number().int(),
+  deletions: z.number().int(),
+  /** Git counted no lines: binary content */
+  binary: z.boolean(),
+  /** File-type icon id, drawn with `fileIconRpc` */
+  icon: z.string(),
+});
+export type CommitFile = z.infer<typeof CommitFileSchema>;
+
+export const CommitDetailsSchema = z.object({
+  sha: z.string(),
+  shortSha: z.string(),
+  /** The files compare with the first parent; a root commit has none */
+  parents: z.array(z.string()),
+  author: z.string(),
+  /** Author date, ISO 8601 */
+  time: z.string(),
+  subject: z.string(),
+  /** The message after the subject, trimmed; empty when there is none */
+  body: z.string(),
+  files: z.array(CommitFileSchema),
+});
+export type CommitDetails = z.infer<typeof CommitDetailsSchema>;
 
 export const gitWorktreesRpc = defineRpc({
   name: "git.worktrees",
@@ -155,11 +189,43 @@ export const gitChangesRpc = defineRpc({
 export const gitCheckoutRpc = defineRpc({
   name: "git.checkout",
   input: WorktreeInputSchema.extend({
-    sha: z.string().regex(/^[0-9a-f]{7,64}$/),
+    sha: CommitShaSchema,
     action: CheckoutActionSchema,
     branch: z.string().min(1).optional(),
   }),
   output: z.object({ message: z.string(), worktreePath: z.string().optional() }),
+});
+
+export const gitCommitDetailsRpc = defineRpc({
+  name: "git.commit-details",
+  input: WorktreeInputSchema.extend({ sha: CommitShaSchema }),
+  output: CommitDetailsSchema,
+});
+
+const CommitFileInputSchema = WorktreeInputSchema.extend({
+  sha: CommitShaSchema,
+  /** CommitFile.path */
+  path: z.string().min(1),
+  /** CommitFile.previousPath of a renamed or copied file */
+  previousPath: z.string().min(1).optional(),
+});
+
+export const gitCommitFileRpc = defineRpc({
+  name: "git.commit-file",
+  input: CommitFileInputSchema,
+  output: z.object({
+    /** Text in the first parent: empty where the file did not exist, null for binary or too large content */
+    original: z.string().nullable(),
+    /** Text in the commit: empty where the file was deleted, null for binary or too large content */
+    current: z.string().nullable(),
+  }),
+});
+
+/** Unified diff of one file against the commit's first parent, for native where the CodeMirror view cannot run */
+export const gitCommitFileDiffRpc = defineRpc({
+  name: "git.commit-file-diff",
+  input: CommitFileInputSchema,
+  output: z.object({ diff: z.string() }),
 });
 
 export const gitIgnoreRpc = defineRpc({

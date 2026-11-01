@@ -6,10 +6,14 @@ import { joinPath, normalizeAbsolute, parentDirectory } from "./tree-model.ts";
 export type ChangeCategory = "tracked" | "untracked";
 export type ChangeFilter = Record<ChangeCategory, boolean>;
 
+/** A row of a tree of paths: a folder, or one of the items listed */
+export type PathRow<Item> =
+  | { kind: "folder"; key: string; name: string; depth: number; collapsed: boolean }
+  | { kind: "file"; key: string; file: Item; depth: number };
+
 export type ChangeRow =
   | { kind: "group"; key: string; category: ChangeCategory; count: number; collapsed: boolean }
-  | { kind: "folder"; key: string; name: string; depth: number; collapsed: boolean }
-  | { kind: "file"; key: string; file: GitFile; depth: number };
+  | PathRow<GitFile>;
 
 export interface ChangeListOptions {
   filter: ChangeFilter;
@@ -79,25 +83,39 @@ export function buildChangeRows(files: readonly GitFile[], options: ChangeListOp
   return rows;
 }
 
-interface FolderNode {
+interface FolderNode<Item> {
   name: string;
   path: string;
-  folders: Map<string, FolderNode>;
-  files: GitFile[];
+  folders: Map<string, FolderNode<Item>>;
+  files: Item[];
 }
 
-function newFolder(name: string, path: string): FolderNode {
+function newFolder<Item>(name: string, path: string): FolderNode<Item> {
   return { name, path, folders: new Map(), files: [] };
 }
 
 function appendFiles(rows: ChangeRow[], files: readonly GitFile[], keyPrefix: string, options: ChangeListOptions): void {
-  if (!options.folders) {
-    for (const file of files) rows.push({ kind: "file", key: `${keyPrefix}file:${file.path}`, file, depth: 0 });
+  if (options.folders) {
+    rows.push(...buildPathRows(files, keyPrefix, options.collapsed));
     return;
   }
-  const root = newFolder("", "");
-  for (const file of files) {
-    const segments = file.path.split("/");
+  for (const file of files) rows.push({ kind: "file", key: `${keyPrefix}file:${file.path}`, file, depth: 0 });
+}
+
+/**
+ * Items nested under their folders (forward-slash paths), depth-first: a folder's subfolders by
+ * name, then its items in the order given. Rows are keyed `<keyPrefix>folder:<path>` and
+ * `<keyPrefix>file:<path>`; a folder whose key is in `collapsed` shows without its contents.
+ */
+export function buildPathRows<Item extends { path: string }>(
+  items: readonly Item[],
+  keyPrefix: string,
+  collapsed: ReadonlySet<string>,
+): PathRow<Item>[] {
+  const rows: PathRow<Item>[] = [];
+  const root = newFolder<Item>("", "");
+  for (const item of items) {
+    const segments = item.path.split("/");
     let node = root;
     for (let index = 0; index < segments.length - 1; index++) {
       let child = node.folders.get(segments[index]);
@@ -107,12 +125,12 @@ function appendFiles(rows: ChangeRow[], files: readonly GitFile[], keyPrefix: st
       }
       node = child;
     }
-    node.files.push(file);
+    node.files.push(item);
   }
   // Depth-first: a folder's subfolders come before its files
-  type Pending = { folder: FolderNode; depth: number } | { file: GitFile; depth: number };
+  type Pending = { folder: FolderNode<Item>; depth: number } | { file: Item; depth: number };
   const pending: Pending[] = [];
-  const pushChildren = (folder: FolderNode, depth: number) => {
+  const pushChildren = (folder: FolderNode<Item>, depth: number) => {
     const folders = [...folder.folders.values()].sort((left, right) => left.name.localeCompare(right.name));
     for (let index = folder.files.length - 1; index >= 0; index--) pending.push({ file: folder.files[index], depth });
     for (let index = folders.length - 1; index >= 0; index--) pending.push({ folder: folders[index], depth });
@@ -132,10 +150,11 @@ function appendFiles(rows: ChangeRow[], files: readonly GitFile[], keyPrefix: st
       name = `${name}/${folder.name}`;
     }
     const key = `${keyPrefix}folder:${folder.path}`;
-    const collapsed = options.collapsed.has(key);
-    rows.push({ kind: "folder", key, name, depth: item.depth, collapsed });
-    if (!collapsed) pushChildren(folder, item.depth + 1);
+    const isCollapsed = collapsed.has(key);
+    rows.push({ kind: "folder", key, name, depth: item.depth, collapsed: isCollapsed });
+    if (!isCollapsed) pushChildren(folder, item.depth + 1);
   }
+  return rows;
 }
 
 function family(members: readonly GitFile[]): StageFamily {

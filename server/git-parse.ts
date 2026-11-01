@@ -1,3 +1,5 @@
+import type { CommitFileStatus } from "../shared/git-contracts";
+
 export interface WorktreeRecord {
   path: string;
   head: string;
@@ -86,6 +88,8 @@ export interface NumstatRecord {
   path: string;
   additions: number;
   deletions: number;
+  /** Git counted no lines ("-"), as it does for binary content */
+  binary: boolean;
 }
 
 /** Parses `git diff --numstat -z`; binary files count as zero lines */
@@ -106,7 +110,47 @@ export function parseNumstatZ(output: string): NumstatRecord[] {
       path,
       additions: Number.parseInt(fields[0], 10) || 0,
       deletions: Number.parseInt(fields[1], 10) || 0,
+      binary: fields[0] === "-",
     });
+  }
+  return records;
+}
+
+export interface NameStatusRecord {
+  status: CommitFileStatus;
+  path: string;
+  /** The original path of a rename or copy */
+  previousPath: string | null;
+}
+
+const CHANGE_STATUS_BY_LETTER: Readonly<Record<string, CommitFileStatus>> = {
+  A: "added",
+  M: "modified",
+  D: "deleted",
+  R: "renamed",
+  C: "copied",
+  T: "type-changed",
+};
+
+/** Parses `git diff-tree --name-status -z`; a status letter it does not know reads as a modification */
+export function parseNameStatusZ(output: string): NameStatusRecord[] {
+  const records: NameStatusRecord[] = [];
+  const parts = output.split("\0");
+  for (let index = 0; index < parts.length; index++) {
+    const letter = parts[index][0];
+    if (!letter) continue;
+    const status = CHANGE_STATUS_BY_LETTER[letter] ?? "modified";
+    // Renames and copies carry two paths, original first (with a similarity score after the letter)
+    if (letter === "R" || letter === "C") {
+      const previousPath = parts[index + 1];
+      const path = parts[index + 2];
+      index += 2;
+      if (previousPath && path) records.push({ status, path, previousPath });
+    } else {
+      const path = parts[index + 1];
+      index += 1;
+      if (path) records.push({ status, path, previousPath: null });
+    }
   }
   return records;
 }
@@ -159,6 +203,36 @@ export function parseLog(output: string): LogRecord[] {
     });
   }
   return records;
+}
+
+/** `git show -s` format matching parseCommitHeader; the body goes last, since it may hold anything */
+export const COMMIT_HEADER_FORMAT = ["%H", "%h", "%P", "%an", "%at", "%s", "%b"].join("%x1f");
+
+export interface CommitHeaderRecord {
+  sha: string;
+  shortSha: string;
+  parents: string[];
+  author: string;
+  /** Author date, ISO 8601 */
+  time: string;
+  subject: string;
+  /** Trimmed; empty when the message is only a subject */
+  body: string;
+}
+
+/** Parses `git show -s --format=COMMIT_HEADER_FORMAT` */
+export function parseCommitHeader(output: string): CommitHeaderRecord {
+  const fields = output.split(LOG_FIELD_SEPARATOR);
+  if (fields.length < 7 || !fields[0]) throw new Error("git did not describe the commit");
+  return {
+    sha: fields[0],
+    shortSha: fields[1],
+    parents: fields[2].split(" ").filter(Boolean),
+    author: fields[3],
+    time: new Date(Number.parseInt(fields[4], 10) * 1000).toISOString(),
+    subject: fields[5],
+    body: fields.slice(6).join(LOG_FIELD_SEPARATOR).trim(),
+  };
 }
 
 /** Line count of text content, or 0 for binary content */

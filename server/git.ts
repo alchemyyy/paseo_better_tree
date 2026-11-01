@@ -7,6 +7,9 @@ import type {
   GitFile,
   Worktree,
   gitCheckoutRpc,
+  gitCommitDetailsRpc,
+  gitCommitFileDiffRpc,
+  gitCommitFileRpc,
   gitCommitRpc,
   gitDiffRpc,
   gitIgnoreRpc,
@@ -20,16 +23,22 @@ import type {
   gitWorktreesRpc,
 } from "../shared/git-contracts";
 import {
+  COMMIT_HEADER_FORMAT,
   countTextLines,
   LOG_FORMAT,
+  parseCommitHeader,
   parseLog,
+  parseNameStatusZ,
   parseNumstatZ,
   parseRenamesZ,
   parseStatusZ,
   parseWorktreeList,
 } from "./git-parse";
 import { appendGitignoreLine, gitignorePattern } from "../shared/gitignore";
+import { isText, MAX_TEXT_BYTES, normalizeLineEndings } from "./diff-sources";
 import { mapLimited } from "./file-work";
+import { fileIconId } from "./file-icons";
+import { type GitObject, prepareGitObjects, readGitObjects } from "./object-reader";
 import { isInsideRepository } from "./repositories";
 import { createSerialQueue } from "./serial-queue";
 import { moveToTrash } from "./trash";
@@ -404,6 +413,98 @@ export async function commitLog({
     // case costs one git call
     if (!(await hasHead(directory))) return { commits: [] };
     throw error;
+  }
+}
+
+// diff-tree is plumbing: user diff settings do not apply, so renames are asked for
+const COMMIT_LISTING = ["diff-tree", "-r", "-z", "-M", "--no-commit-id"];
+
+/** A commit's message and the files it changes against its first parent (every file of a root commit) */
+export async function commitDetails({
+  worktree,
+  sha,
+}: RpcInput<typeof gitCommitDetailsRpc>): Promise<RpcOutput<typeof gitCommitDetailsRpc>> {
+  const directory = assertDirectory(worktree);
+  // The files' texts are read next; the reader starts while git lists them
+  prepareGitObjects(directory);
+  // Most commits have a parent, so the files are listed beside the commit's description rather
+  // than after it. A first commit has none: that listing fails unawaited and runs again with --root
+  const againstParent = Promise.all([
+    runGit(directory, [...COMMIT_LISTING, "--name-status", `${sha}^`, sha]),
+    runGit(directory, [...COMMIT_LISTING, "--numstat", `${sha}^`, sha]),
+  ]);
+  againstParent.catch(() => undefined);
+  // A signature check (log.showSignature) would print ahead of the format
+  const header = parseCommitHeader(
+    await runGit(directory, ["show", "-s", "--no-show-signature", `--format=${COMMIT_HEADER_FORMAT}`, sha, "--"]),
+  );
+  const [nameStatus, numstat] =
+    header.parents.length > 0
+      ? await againstParent
+      : await Promise.all([
+          runGit(directory, [...COMMIT_LISTING, "--name-status", "--root", header.sha]),
+          runGit(directory, [...COMMIT_LISTING, "--numstat", "--root", header.sha]),
+        ]);
+  const totals = new Map(parseNumstatZ(numstat).map((record) => [record.path, record]));
+  const files = parseNameStatusZ(nameStatus).map((record) => {
+    const total = totals.get(record.path);
+    return {
+      ...record,
+      additions: total?.additions ?? 0,
+      deletions: total?.deletions ?? 0,
+      binary: total?.binary ?? false,
+      icon: fileIconId(record.path.slice(record.path.lastIndexOf("/") + 1)),
+    };
+  });
+  return { ...header, files };
+}
+
+/** The worktree directory, after checking that the file's paths stay inside it */
+function commitFileDirectory({ worktree, path: relativePath, previousPath }: RpcInput<typeof gitCommitFileRpc>): string {
+  const directory = assertDirectory(worktree);
+  resolveInsideRoot(directory, relativePath);
+  if (previousPath) resolveInsideRoot(directory, previousPath);
+  return directory;
+}
+
+/** A file's text: empty where the commit lacks the file, null when binary, too large, or not a file */
+function blobText(object: GitObject): string | null {
+  if (!object.found) return "";
+  if (object.type !== "blob" || object.content === null) return null;
+  const text = object.content.toString("utf8");
+  return isText(text) ? normalizeLineEndings(text) : null;
+}
+
+/** A file's text in its commit's first parent and in the commit, for the diff views */
+export async function commitFileSources(
+  input: RpcInput<typeof gitCommitFileRpc>,
+): Promise<RpcOutput<typeof gitCommitFileRpc>> {
+  const directory = commitFileDirectory(input);
+  const { sha, path: filePath, previousPath } = input;
+  // A first commit has no parent, so its files read as new
+  const [commit, original, current] = await readGitObjects(
+    directory,
+    [`${sha}^{commit}`, `${sha}^:${previousPath ?? filePath}`, `${sha}:${filePath}`],
+    MAX_TEXT_BYTES,
+  );
+  if (!commit.found) throw new Error(`Not a commit: ${sha}`);
+  return { original: blobText(original), current: blobText(current) };
+}
+
+/** Unified diff of one file of a commit against its first parent */
+export async function commitFileDiff(
+  input: RpcInput<typeof gitCommitFileDiffRpc>,
+): Promise<RpcOutput<typeof gitCommitFileDiffRpc>> {
+  const directory = commitFileDirectory(input);
+  const patch = ["diff-tree", "-p", "-M", "--no-color", "--no-commit-id"];
+  const paths = ["--", ...(input.previousPath ? [input.previousPath, input.path] : [input.path])];
+  try {
+    return { diff: await runGit(directory, [...patch, `${input.sha}^`, input.sha, ...paths]) };
+  } catch (error) {
+    // A first commit has no parent; it compares with nothing
+    const [parent] = await readGitObjects(directory, [`${input.sha}^`], 0);
+    if (parent.found) throw error;
+    return { diff: await runGit(directory, [...patch, "--root", input.sha, ...paths]) };
   }
 }
 

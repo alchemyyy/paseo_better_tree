@@ -4,6 +4,8 @@ export const UNTRACKED_COLOR = "#3fb950";
 export const STAGED_COLOR = "#a371f7";
 /** Git repository folders: the violet better-chat-management gives branch names in the sidebar */
 export const REPOSITORY_COLOR = "#c4b5fd";
+/** Files a commit deleted */
+export const DELETED_COLOR = "#f85149";
 
 export const ADDITION_BACKGROUND = "rgba(63, 185, 80, 0.15)";
 export const DELETION_BACKGROUND = "rgba(248, 81, 73, 0.15)";

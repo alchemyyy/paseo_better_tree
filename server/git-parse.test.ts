@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   countTextLines,
+  parseCommitHeader,
   parseLog,
+  parseNameStatusZ,
   parseNumstatZ,
   parseRenamesZ,
   parseStatusZ,
@@ -51,13 +53,43 @@ test("parseStatusZ skips the original path of renames", () => {
   ]);
 });
 
-test("parseNumstatZ handles renames and binary files", () => {
+test("parseNumstatZ handles renames and flags binary files, which count as zero lines", () => {
   const output = "3\t1\tsrc/a.ts\0" + "2\t0\t\0old.ts\0new.ts\0" + "-\t-\timage.png\0";
   assert.deepEqual(parseNumstatZ(output), [
-    { path: "src/a.ts", additions: 3, deletions: 1 },
-    { path: "new.ts", additions: 2, deletions: 0 },
-    { path: "image.png", additions: 0, deletions: 0 },
+    { path: "src/a.ts", additions: 3, deletions: 1, binary: false },
+    { path: "new.ts", additions: 2, deletions: 0, binary: false },
+    { path: "image.png", additions: 0, deletions: 0, binary: true },
   ]);
+});
+
+test("parseNameStatusZ reads every status, takes both paths of renames and copies, and keeps tab-free odd names", () => {
+  const output =
+    "A\0new file.ts\0M\0src/a.ts\0D\0gone.ts\0R087\0old name.ts\0dir/new name.ts\0" +
+    "C100\0x.ts\0y.ts\0T\0link\0X\0odd.ts\0";
+  assert.deepEqual(parseNameStatusZ(output), [
+    { status: "added", path: "new file.ts", previousPath: null },
+    { status: "modified", path: "src/a.ts", previousPath: null },
+    { status: "deleted", path: "gone.ts", previousPath: null },
+    { status: "renamed", path: "dir/new name.ts", previousPath: "old name.ts" },
+    { status: "copied", path: "y.ts", previousPath: "x.ts" },
+    { status: "type-changed", path: "link", previousPath: null },
+    { status: "modified", path: "odd.ts", previousPath: null },
+  ]);
+  assert.deepEqual(parseNameStatusZ(""), []);
+});
+
+test("parseCommitHeader reads parents and keeps a body that holds the field separator", () => {
+  const merge = parseCommitHeader(
+    ["a".repeat(40), "aaaaaaa", `${"b".repeat(40)} ${"c".repeat(40)}`, "Ada", "1700000000", "Merge x", "Line one\n\nodd\x1fpart\n\n"].join("\x1f"),
+  );
+  assert.deepEqual(merge.parents, ["b".repeat(40), "c".repeat(40)]);
+  assert.equal(merge.time, new Date(1700000000 * 1000).toISOString());
+  assert.equal(merge.body, "Line one\n\nodd\x1fpart");
+  const root = parseCommitHeader(["d".repeat(40), "ddddddd", "", "Bob", "1600000000", "Init", "\n"].join("\x1f"));
+  assert.deepEqual(root.parents, []);
+  assert.equal(root.subject, "Init");
+  assert.equal(root.body, "");
+  assert.throws(() => parseCommitHeader(""));
 });
 
 test("parseLog extracts local branches and HEAD", () => {

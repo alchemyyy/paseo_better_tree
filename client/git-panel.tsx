@@ -58,6 +58,7 @@ import { type CheckoutChoice, CheckoutModal } from "./checkout-modal";
 import { type Confirmation, ConfirmModal, trashName } from "./confirm-modal";
 import { ContextMenu, type ContextMenuGroups } from "./context-menu";
 import { CommitSection } from "./commit-section";
+import { openCommitTab } from "./commit-tabs";
 import { publishGitStatus } from "./change-registry";
 import { openDiffTab } from "./diff-tabs";
 import { useExclusivePane } from "./exclusive-pane";
@@ -69,6 +70,7 @@ import { formatRelativeTime } from "./git-model";
 import { useStaging } from "./git-staging";
 import { findPaneBridge } from "./host-bridge";
 import { findLayoutStore } from "./layout-guard";
+import { LineTotals } from "./line-totals";
 import { placeRemoteMenu, RemoteButton, RemoteMenu, type RemoteMenuPlacement } from "./remote-actions";
 import { TREE_PANEL_ID } from "./panel-ids";
 import { SplitSections } from "./split-sections";
@@ -273,6 +275,25 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
         { worktree: selectedPath, path: file.path },
         fileCategory(file),
       );
+    },
+    [selectedPath, toast],
+  );
+
+  const openCommit = useCallback(
+    (commit: Commit) => {
+      if (!selectedPath) return;
+      const bridge = findPaneBridge(rootRef.current);
+      const store = findLayoutStore(rootRef.current);
+      if (!bridge || !store || bridge.target.kind !== "plugin") {
+        toast.error("Opening commits needs the Paseo desktop or web app");
+        return;
+      }
+      openCommitTab(store, `${bridge.serverId}:${bridge.workspaceId}`, bridge.target.pluginId, {
+        worktree: selectedPath,
+        sha: commit.sha,
+        shortSha: commit.shortSha,
+        subject: commit.subject,
+      });
     },
     [selectedPath, toast],
   );
@@ -626,6 +647,7 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
             remoteAction={remoteAction}
             remoteBusy={gitBusy === remoteAction}
             onCheckout={setCheckoutCommit}
+            onOpen={openCommit}
             onUncommit={handleUncommit}
             onRemote={handleRemote}
             onOpenRemoteMenu={openRemoteMenu}
@@ -735,27 +757,6 @@ function FocusedRepositoryBar({
         <Icon name="X" size={ICON_SIZE} color={theme.colors.foregroundMuted} />
       </Pressable>
     </View>
-  );
-}
-
-function LineTotals({
-  additions,
-  deletions,
-  theme,
-  fontSize = SMALL_FONT_SIZE,
-}: {
-  additions: number;
-  deletions: number;
-  theme: PluginTheme;
-  fontSize?: number;
-}) {
-  if (additions === 0 && deletions === 0) return null;
-  return (
-    <Text style={{ fontSize }}>
-      <Text style={{ color: theme.colors.statusSuccess }}>+{additions}</Text>
-      <Text style={{ color: theme.colors.foregroundMuted }}> </Text>
-      <Text style={{ color: theme.colors.statusDanger }}>−{deletions}</Text>
-    </Text>
   );
 }
 
@@ -1297,6 +1298,7 @@ function HistorySection({
   remoteAction,
   remoteBusy,
   onCheckout,
+  onOpen,
   onUncommit,
   onRemote,
   onOpenRemoteMenu,
@@ -1313,10 +1315,14 @@ function HistorySection({
   /** `remoteAction` is running */
   remoteBusy: boolean;
   onCheckout(commit: Commit): void;
+  /** Shows the commit's changes in its own tab */
+  onOpen(commit: Commit): void;
   onUncommit(): void;
   onRemote(action: RemoteAction): void;
   onOpenRemoteMenu(anchor: View | null): void;
 }) {
+  // The row under the pointer gets the selected row's highlight, as worktree rows do
+  const [hoveredSha, setHoveredSha] = useState<string | null>(null);
   let body: ReactNode;
   if (error) body = <Text style={styles.message}>{error}</Text>;
   else if (loading) body = <Loading />;
@@ -1327,21 +1333,30 @@ function HistorySection({
         data={commits}
         keyExtractor={(commit) => commit.sha}
         renderItem={({ item, index }) => (
-          <View style={styles.row}>
-            <Icon
-              name={item.isHead ? "CircleDot" : "GitCommitHorizontal"}
-              size={ICON_SIZE}
-              color={item.isHead ? theme.colors.accent : theme.colors.foregroundMuted}
-            />
-            <View style={styles.rowText}>
-              <Text numberOfLines={1} style={styles.rowTitle}>
-                {item.subject}
-              </Text>
-              <Text numberOfLines={1} style={styles.rowDetail}>
-                {item.shortSha} · {item.author} · {formatRelativeTime(item.time, now)}
-                {item.branches.length > 0 ? ` · ${item.branches.join(", ")}` : ""}
-              </Text>
-            </View>
+          <View style={[styles.commitRow, item.sha === hoveredSha ? styles.rowHighlighted : null]}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Show commit ${item.shortSha}: ${item.subject}`}
+              onPress={() => onOpen(item)}
+              onHoverIn={() => setHoveredSha(item.sha)}
+              onHoverOut={() => setHoveredSha((current) => (current === item.sha ? null : current))}
+              style={({ pressed }) => [styles.commitButton, pressed ? styles.rowPressed : null]}
+            >
+              <Icon
+                name={item.isHead ? "CircleDot" : "GitCommitHorizontal"}
+                size={ICON_SIZE}
+                color={item.isHead ? theme.colors.accent : theme.colors.foregroundMuted}
+              />
+              <View style={styles.rowText}>
+                <Text numberOfLines={1} style={styles.rowTitle}>
+                  {item.subject}
+                </Text>
+                <Text numberOfLines={1} style={styles.rowDetail}>
+                  {item.shortSha} · {item.author} · {formatRelativeTime(item.time, now)}
+                  {item.branches.length > 0 ? ` · ${item.branches.join(", ")}` : ""}
+                </Text>
+              </View>
+            </Pressable>
             {/* The newest commit can be undone unless it is the repository's first */}
             {index === 0 && item.isHead && commits.length > 1 ? (
               <Pressable
@@ -1433,6 +1448,17 @@ function createStyles(theme: PluginTheme) {
     },
     rowHighlighted: { backgroundColor: theme.colors.surface2 },
     rowPressed: { backgroundColor: theme.colors.surface1 },
+    // A history row presses as a whole but for its buttons, which sit beside its pressable part
+    commitRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingRight: 10 },
+    commitButton: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingLeft: 10,
+      paddingVertical: 4,
+    },
     rowMissing: { opacity: 0.5 },
     rowText: { flex: 1, minWidth: 0 },
     rowTitle: { color: theme.colors.foreground, fontSize: FONT_SIZE },
