@@ -7,6 +7,7 @@
 // link first asks the stock tree to expand to the folder through the panel store's
 // setExpandedPathsForWorkspace, keyed "workspace:<workspace id>".
 import { type RefObject, useEffect } from "react";
+import type { PaneBridge } from "./host-bridge";
 import {
   closeVisibleStockChanges,
   findLayoutStore,
@@ -37,8 +38,17 @@ let removeLayoutHooks: (() => void) | null = null;
 let removeSetExpanded: (() => void) | null = null;
 /** Workspace keys whose stock tree open was rerouted, with when, awaiting the folder to reveal */
 const awaitingFolder = new Map<string, number>();
-/** Folder (workspace-relative or absolute) each workspace's tree should reveal */
-const pendingReveals = new Map<string, string>();
+/** An entry the workspace's main tree should show */
+export interface TreeReveal {
+  /** Workspace-relative or absolute */
+  path: string;
+  kind: "file" | "directory";
+  /** Gives the tree the keyboard, for a command aimed at the tree rather than a link */
+  focus: boolean;
+}
+
+/** What each workspace's main tree should show next */
+const pendingReveals = new Map<string, TreeReveal>();
 const revealListeners = new Set<() => void>();
 
 /**
@@ -67,11 +77,24 @@ export function stopStockViews(): void {
   pendingReveals.clear();
 }
 
-/** The folder waiting to be revealed in this workspace's tree, removed once taken */
-export function takeTreeReveal(workspaceKey: string): string | null {
-  const path = pendingReveals.get(workspaceKey) ?? null;
+/** What this workspace's tree should show next, removed once taken */
+export function takeTreeReveal(workspaceKey: string): TreeReveal | null {
+  const reveal = pendingReveals.get(workspaceKey) ?? null;
   pendingReveals.delete(workspaceKey);
-  return path;
+  return reveal;
+}
+
+/**
+ * Selects `path` (absolute) in the workspace's main file tree and gives the tree the keyboard,
+ * bringing the tree into view and opening it when it is closed
+ */
+export function revealInTree(store: LayoutStoreApi, bridge: PaneBridge, path: string, kind: TreeReveal["kind"]): void {
+  if (bridge.target.kind !== "plugin") return;
+  const workspaceKey = `${bridge.serverId}:${bridge.workspaceId}`;
+  if (showTreeTab(store, workspaceKey, bridge.target.pluginId) === null) return;
+  // A tree opened just now takes the request once it mounts
+  pendingReveals.set(workspaceKey, { path, kind, focus: true });
+  for (const listener of revealListeners) listener();
 }
 
 export function subscribeTreeReveals(listener: () => void): () => void {
@@ -181,7 +204,7 @@ function noteExpansion(explorerKey: string, paths: unknown): void {
     const requested = typeof paths === "function" ? (paths as (current: string[]) => unknown)([]) : paths;
     const folder = Array.isArray(requested) ? requested[requested.length - 1] : undefined;
     if (typeof folder !== "string" || folder === "" || folder === ".") continue;
-    pendingReveals.set(workspaceKey, folder);
+    pendingReveals.set(workspaceKey, { path: folder, kind: "directory", focus: false });
     for (const listener of revealListeners) listener();
   }
 }

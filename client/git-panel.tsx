@@ -61,7 +61,7 @@ import { CommitSection } from "./commit-section";
 import { publishGitStatus } from "./change-registry";
 import { openDiffTab } from "./diff-tabs";
 import { useExclusivePane } from "./exclusive-pane";
-import { useStockViews } from "./stock-views";
+import { revealInTree, useStockViews } from "./stock-views";
 import { REPOSITORY_COLOR, STAGED_COLOR, TRACKED_COLOR, UNTRACKED_COLOR } from "./git-colors";
 import { DEFAULT_GIT_TAB_STATE, type FileFilter, GitTabStateSchema, type GitTabState } from "./git-focus";
 import { GIT_QUERY_KEY, GIT_REFRESH_MS, useGitChangeRefresh } from "./git-live";
@@ -489,6 +489,20 @@ export function GitPanel({ workspaceId, theme, tab }: PluginWorkspacePanelProps)
     };
     return [
       [
+        {
+          id: "go-to",
+          label: isFolder ? "Go to folder" : "Go to file",
+          icon: "LocateFixed",
+          onSelect: () => {
+            const bridge = findPaneBridge(rootRef.current);
+            const store = findLayoutStore(rootRef.current);
+            if (!bridge || !store) {
+              toast.error("The file tree needs the Paseo desktop or web app");
+              return;
+            }
+            revealInTree(store, bridge, joinPath(worktree, target.path), target.kind);
+          },
+        },
         {
           id: "show",
           label: "Show in file explorer",

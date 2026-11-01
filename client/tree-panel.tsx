@@ -50,7 +50,7 @@ import {
 import { filterMatchRanges, parseTreeFilter, type TreeFilter } from "../shared/tree-filter";
 import { Checkbox } from "./checkbox";
 import { ContextMenu, type ContextMenuGroups, type ContextMenuItem } from "./context-menu";
-import { subscribeTreeReveals, takeTreeReveal, useStockViews } from "./stock-views";
+import { subscribeTreeReveals, takeTreeReveal, type TreeReveal, useStockViews } from "./stock-views";
 import { type Confirmation, ConfirmModal, trashName } from "./confirm-modal";
 import { setFileClipboard, useFileClipboard } from "./file-clipboard";
 import { REPOSITORY_COLOR } from "./git-colors";
@@ -534,9 +534,13 @@ function TreePanel({
     },
     [updateTabState],
   );
-  // Rerouted folder links
-  const revealFolder = useCallback(
-    (path: string) => {
+  /**
+   * Shows an entry asked for from outside the tree: a folder link Paseo rerouted here, or Go to
+   * file in the Git panel. The folder holding it is listed afresh, so a file made since the last
+   * refresh is found; one that no longer exists leaves the nearest folder above it shown instead.
+   */
+  const revealRequested = useCallback(
+    async ({ path, kind, focus }: TreeReveal) => {
       if (!root) return;
       const absolute = /^([A-Za-z]:[\\/]|[\\/])/.test(path) ? path : joinPath(workspaceDirectory ?? root, path);
       const relative = relativeInside(root, absolute);
@@ -544,32 +548,48 @@ function TreePanel({
         toast.show(`${path} is outside this tree view`);
         return;
       }
-      if (relative !== ROOT_PATH) revealPath(relative, true);
+      let shown = relative;
+      while (shown !== ROOT_PATH) {
+        const folder = parentPath(shown);
+        const listing = await queryClient
+          .fetchQuery({
+            queryKey: ["better-tree", "directory", root, folder],
+            queryFn: () => listDirectory({ root, path: folder }),
+            staleTime: 0,
+          })
+          .catch(() => null);
+        if (listing?.entries.some((entry) => entry.path === shown)) break;
+        shown = folder;
+      }
+      if (shown !== relative) toast.show(`${baseName(relative)} was not found in the tree`);
+      if (shown !== ROOT_PATH) revealPath(shown, shown !== relative || kind === "directory");
+      if (focus) focusView(rootRef.current);
     },
-    [root, workspaceDirectory, toast, revealPath],
+    [root, workspaceDirectory, toast, queryClient, listDirectory, revealPath],
   );
-  const revealFolderRef = useRef(revealFolder);
-  revealFolderRef.current = revealFolder;
+  const revealRequestedRef = useRef(revealRequested);
+  revealRequestedRef.current = revealRequested;
   useEffect(() => {
     if (!primary || !root) return;
     const bridge = findPaneBridge(rootRef.current);
     if (!bridge) return;
     const workspaceKey = `${bridge.serverId}:${bridge.workspaceId}`;
     const consume = () => {
-      const path = takeTreeReveal(workspaceKey);
-      if (path !== null) revealFolderRef.current(path);
+      const reveal = takeTreeReveal(workspaceKey);
+      if (reveal !== null) void revealRequestedRef.current(reveal);
     };
     // A reveal may have arrived while this tree was still opening
     consume();
     return subscribeTreeReveals(consume);
   }, [primary, root]);
   useEffect(() => {
-    if (scrollTarget === null) return;
+    // A reveal ends the filter first; scrolling the filter's rows would leave the tree elsewhere
+    if (scrollTarget === null || filtering) return;
     const index = displayRows.findIndex((row) => row.entry.path === scrollTarget);
     if (index < 0) return;
     listRef.current?.scrollToIndex({ index, viewPosition: 0.3, animated: true });
     setScrollTarget(null);
-  }, [displayRows, scrollTarget]);
+  }, [displayRows, scrollTarget, filtering]);
   const parentRoot = root ? parentDirectory(root) : null;
   const pinnedFolders = usePinnedFolders(rootRef);
 
