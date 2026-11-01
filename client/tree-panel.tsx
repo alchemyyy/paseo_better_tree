@@ -651,7 +651,8 @@ function TreePanel({
 
   /** Shows a repository folder in the workspace's Git panel, opening the panel when it is closed */
   const focusRepository = useCallback(
-    (folder: string) => {
+    (entry: TreeEntry) => {
+      if (!root) return;
       const bridge = findPaneBridge(rootRef.current);
       const store = findLayoutStore(rootRef.current);
       if (!bridge || !store) {
@@ -659,9 +660,9 @@ function TreePanel({
         return;
       }
       // The Git panel treats the main tree's own root folder as no focus
-      focusGitRepository(store, bridge, folder);
+      focusGitRepository(store, bridge, joinPath(root, entry.path));
     },
-    [toast],
+    [root, toast],
   );
 
   /** Re-roots this view at a folder; a repository there shows in the Git panel */
@@ -673,7 +674,7 @@ function TreePanel({
       if (!entry.repository || layout.compact) return;
       // The Git panel follows the main tree's root folder; another tree view's root is focused there
       if (!primary) {
-        focusRepository(folder);
+        focusRepository(entry);
         return;
       }
       const bridge = findPaneBridge(rootRef.current);
@@ -1124,7 +1125,7 @@ function TreePanel({
             id: "focus-repository",
             label: "Focus git repo",
             icon: "FolderGit2",
-            onSelect: () => focusRepository(absolute),
+            onSelect: () => focusRepository(entry),
           });
         }
       }
@@ -1290,6 +1291,7 @@ function TreePanel({
           onLongPress={longPressRow}
           onAttach={attachToChat}
           onPin={layout.compact ? undefined : togglePin}
+          onFocusRepository={layout.compact ? undefined : focusRepository}
         />
       );
     },
@@ -1318,6 +1320,7 @@ function TreePanel({
       longPressRow,
       attachToChat,
       togglePin,
+      focusRepository,
     ],
   );
 
@@ -1543,6 +1546,7 @@ const TreeRowView = memo(function TreeRowView({
   onLongPress,
   onAttach,
   onPin,
+  onFocusRepository,
 }: {
   row: TreeRow;
   selected: boolean;
@@ -1571,6 +1575,8 @@ const TreeRowView = memo(function TreeRowView({
   onAttach(entries: readonly TreeEntry[]): void;
   /** Pins or unpins; absent where pinned views cannot open (compact layouts) */
   onPin?: (entry: TreeEntry, pinned: boolean) => void;
+  /** Shows a repository folder in the Git panel; absent where the Git panel cannot open (compact layouts) */
+  onFocusRepository?: (entry: TreeEntry) => void;
 }) {
   const { entry, depth, expanded, loading } = row;
   const isDirectory = entry.kind === "directory";
@@ -1640,6 +1646,23 @@ const TreeRowView = memo(function TreeRowView({
         )}
         {loading ? <Text style={{ color: mutedColor, fontSize }}>…</Text> : null}
       </Pressable>
+      {!editor && entry.repository && onFocusRepository ? (
+        <Pressable
+          {...treeActionDataProps()}
+          {...hiddenUnless(showActions)}
+          accessibilityRole="button"
+          accessibilityLabel={`Focus the ${entry.name} repository in the Git panel`}
+          hitSlop={4}
+          onPress={() => onFocusRepository(entry)}
+          style={({ pressed }) => ({
+            paddingLeft: 8,
+            paddingVertical: rowPadding,
+            opacity: showActions ? (pressed ? 0.5 : 1) : 0,
+          })}
+        >
+          <Icon name="FolderGit2" size={iconSize} color={mutedColor} />
+        </Pressable>
+      ) : null}
       {!editor && isDirectory && onPin ? (
         <Pressable
           {...treeActionDataProps()}
