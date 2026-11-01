@@ -4,14 +4,17 @@ Paseo plugin that adds a VS Code-style file tree, a Git panel, diff views, and c
 
 ## Install
 
-1. Install [Paseo](https://paseo.sh) 0.13.0 or later and turn on Settings > Plugins > Enable plugins.
-2. Run the install script from this folder:
+Requires [Paseo](https://paseo.sh) 0.13.0 or later with plugins turned on (Settings > Plugins > Enable plugins).
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File install.ps1
-   ```
+```sh
+paseo plugin install https://github.com/alchemyyy/paseo_better_tree
+```
 
-   It runs `paseo plugin install <this folder>` the first time and `paseo plugin reload better-tree` afterwards, and warns if plugins are disabled in `~/.paseo/config.json`. `-PaseoCli <path>` points to `paseo.cmd` when it is not on `PATH` or in the default install folders.
+`paseo plugin update better-tree` updates it, and `paseo plugin remove better-tree` removes it. The [Plugin manager](https://github.com/alchemyyy/paseo_plugin_manager) plugin checks and updates installed plugins from the sidebar.
+
+The `paseo` command comes with the desktop app: Settings > Integrations > Command line puts it on `PATH`, or run `paseo.cmd` from the app's `resources\bin` folder.
+
+To work on the plugin, clone this repository and install the folder instead (`paseo plugin install <folder>`), then run `paseo plugin reload better-tree` after editing it.
 
 ## Features
 
