@@ -33,7 +33,7 @@ To work on the plugin, clone this repository and install the folder instead (`pa
 - Paste copies or moves; a taken name becomes `<name> copy`, `<name> copy 2`, ... Create and rename never overwrite and reject names Windows refuses. Delete asks for confirmation and moves to the Recycle Bin or Trash.
 - Keyboard shortcuts (macOS in parentheses): Cut Ctrl+X, Copy Ctrl+C, Paste Ctrl+V, Copy path Shift+Alt+C (Cmd+Option+C), Copy relative path Ctrl+K Ctrl+Shift+C (Cmd+Shift+Option+C), Rename F2 (Enter), Delete Del (Cmd+Backspace), Open in file browser Shift+Alt+R (Cmd+Option+R), Filter Ctrl+F (Cmd+F).
 - Display: Ctrl+scroll changes row spacing (0-16px, default 3), Shift+scroll text weight (100-900, default 400), Alt+scroll text size (9-24px, default 13); the same modifier with middle-click resets.
-- Host actions run on the daemon host: default text editor from the registry (Windows) or `xdg-open`; Windows Terminal or cmd, Terminal.app, or the first available Linux terminal; Explorer, Finder, or a freedesktop file manager with the file selected.
+- Host actions run on the daemon host: default text editor from the registry (Windows) or `xdg-open`; Windows Terminal or cmd, Terminal.app, or the first available Linux terminal; Explorer, Finder, or a freedesktop file manager with the file selected. On Windows, a folder already open in Explorer on the current virtual desktop (in a window or a tab) comes to the front, switched to that tab and with the file selected, instead of a second window opening.
 
 ### Git panel
 

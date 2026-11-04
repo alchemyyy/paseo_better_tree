@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import { execCommand } from "@getpaseo/plugin/server";
 import type { openInFileBrowserRpc, openWithDefaultAppRpc } from "../shared/contracts";
+import { showInOpenExplorerWindow } from "./explorer-windows";
 import { launchDetached } from "./launch";
 import { explorerArgument } from "./windows-command";
 import { resolveInsideRoot } from "./workspace-path";
@@ -13,7 +14,8 @@ const DBUS_TIMEOUT_MS = 5000;
 /**
  * Shows a folder, or a file selected in its folder, in the daemon host's file browser. A path
  * that no longer exists (a deleted file in the Git changes list) shows its nearest existing
- * folder inside the root instead.
+ * folder inside the root instead. On Windows, a window already showing that folder comes to the
+ * front instead of a second one opening.
  */
 export async function openInFileBrowser({
   root,
@@ -30,6 +32,9 @@ export async function openInFileBrowser({
   const isDirectory = stats.isDirectory();
   switch (process.platform) {
     case "win32":
+      if (await showInOpenExplorerWindow(isDirectory ? target : path.dirname(target), isDirectory ? null : path.basename(target))) {
+        break;
+      }
       // Explorer parses its own command line, so the argument is passed verbatim
       await launchDetached({
         command: "explorer.exe",
